@@ -1,0 +1,77 @@
+/* autoDS-PET brand overrides for pydata-sphinx-theme */
+
+/* ── Navbar logo ── */
+.navbar-brand img {
+    max-height: 45px;
+    width: auto;
+}
+
+/* ── Light mode ── */
+html[data-theme="light"] {
+    --pst-color-primary: #0dafb5;
+    --pst-color-primary-highlight: #098a8f;
+    --pst-color-primary-text: #098a8f;
+    --pst-color-link: #0dafb5;
+    --pst-color-link-hover: #098a8f;
+}
+
+/* ── Dark mode ── */
+html[data-theme="dark"] {
+    --pst-color-primary: #42d4da;
+    --pst-color-primary-highlight: #6ee3e8;
+    --pst-color-primary-text: #42d4da;
+    --pst-color-link: #42d4da;
+    --pst-color-link-hover: #6ee3e8;
+}
+
+/* ── Admonitions ── */
+.admonition.note {
+    border-left-color: #0dafb5;
+}
+
+.admonition.tip {
+    border-left-color: #0dafb5;
+}
+
+.admonition.warning {
+    border-left-color: #e67e22;
+}
+
+.admonition.important {
+    border-left-color: #0dafb5;
+}
+
+/* ── sphinx-design cards ── */
+.sd-card {
+    border-radius: 8px;
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.sd-card:hover {
+    box-shadow: 0 4px 16px rgba(13, 175, 181, 0.15);
+    transform: translateY(-2px);
+}
+
+html[data-theme="dark"] .sd-card:hover {
+    box-shadow: 0 4px 16px rgba(66, 212, 218, 0.15);
+}
+
+.sd-card .sd-card-header {
+    font-weight: 600;
+}
+
+/* ── Code blocks ── */
+div.highlight pre {
+    border-radius: 6px;
+}
+
+/* ── Sidebar nav active link ── */
+.bd-sidebar-primary .nav-link.active {
+    border-left-color: #0dafb5;
+    color: #0dafb5;
+}
+
+html[data-theme="dark"] .bd-sidebar-primary .nav-link.active {
+    border-left-color: #42d4da;
+    color: #42d4da;
+}

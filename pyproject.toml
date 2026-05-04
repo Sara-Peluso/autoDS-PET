@@ -1,0 +1,96 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autods-pet"
+dynamic = ["version", "dependencies", "optional-dependencies"]
+description = "Automatic and semi-automatic Deauville Score computation from PET/CT images"
+readme = {file = "README.md", content-type = "text/markdown"}
+authors = [
+  { name = "Sara Peluso", email = "sara.peluso5@unibo.it" }
+]
+license = "MIT"
+requires-python = ">=3.10"
+keywords = ["PET/CT", "Deauville", "bone-marrow", "segmentation", "nuclear-medicine"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/Sara-Peluso/autoDS-PET"
+Documentation = "https://autods-pet.readthedocs.io/"
+Source = "https://github.com/Sara-Peluso/autoDS-PET"
+Issues = "https://github.com/Sara-Peluso/autoDS-PET/issues"
+
+[project.scripts]
+autods-pet = "autods_pet.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "autods_pet.__version__"}
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.dynamic.optional-dependencies]
+docs = {file = ["requirements-docs.txt"]}
+dev = {file = ["requirements-dev.txt"]}
+dicom-seg = {file = ["requirements-dicom-seg.txt"]}
+all = {file = ["requirements-dicom-seg.txt", "requirements-dev.txt", "requirements-docs.txt"]}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["autods_pet*"]
+
+[tool.setuptools.package-data]
+autods_pet = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks integration tests",
+]
+filterwarnings = [
+    "ignore:builtin type Swig:DeprecationWarning",
+]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = false
+warn_unused_configs = true
+# SimpleITK ships no type stubs; suppress the resulting noise.
+[[tool.mypy.overrides]]
+module = ["SimpleITK", "SimpleITK.*"]
+ignore_missing_imports = true
+# pandas stubs are optional; install pandas-stubs for full checking.
+[[tool.mypy.overrides]]
+module = ["pandas", "pandas.*"]
+ignore_missing_imports = true
+[[tool.mypy.overrides]]
+module = ["highdicom", "highdicom.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "D", "B"]
+ignore = ["E501", "D100", "D104", "D105", "D107"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.isort]
+known-first-party = ["autods_pet"]

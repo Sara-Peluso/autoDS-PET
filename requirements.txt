@@ -1,0 +1,9 @@
+SimpleITK-SimpleElastix
+numpy
+pandas<3.0
+pydicom
+openpyxl
+tqdm
+TotalSegmentator>=2.0,<3.0
+typer
+rich
