@@ -391,7 +391,7 @@ def test_load_and_resolve_ignores_files_in_basepath(tmp_path):
 
 def test_load_and_resolve_no_patients_raises_exit(tmp_path):
     """Empty basepath with no patient_list raises typer.Exit."""
-    from click.exceptions import Exit
+    from typer import Exit
 
     from autods_pet.cli import _load_and_resolve
 
