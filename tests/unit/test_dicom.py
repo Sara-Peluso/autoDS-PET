@@ -93,6 +93,48 @@ def test_extract_pet_tags_fallback_no_sequence(tmp_path):
     assert tags["RadionuclideHalfLife"] == 6586.2
     # RadiopharmaceuticalStartTime not available without sequence
     assert tags["RadiopharmaceuticalStartTime"] is None
+    assert tags["RadiopharmaceuticalStartDateTime"] is None
+
+
+def test_extract_pet_tags_start_datetime_from_sequence(tmp_path):
+    """RadiopharmaceuticalStartDateTime (0018,1078) is read from the sequence."""
+    ds = Dataset()
+    ds.PatientID = "TEST001"
+    ds.StudyDate = "20260325"
+    ds.AcquisitionTime = "143025"
+    ds.Modality = "PT"
+    rph = Dataset()
+    rph.RadiopharmaceuticalStartDateTime = "20260325140000.000000"
+    rph.RadionuclideTotalDose = "370000000"
+    rph.RadionuclideHalfLife = "6586.2"
+    ds.RadiopharmaceuticalInformationSequence = Sequence([rph])
+    ds.file_meta = pydicom.dataset.FileMetaDataset()
+    ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    ds.file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.128"
+    ds.file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid()
+    path = tmp_path / "enhanced.dcm"
+    ds.save_as(str(path))
+
+    tags = extract_pet_tags(path)
+    # Enhanced PET objects often leave the time-only tag empty.
+    assert tags["RadiopharmaceuticalStartTime"] is None
+    assert tags["RadiopharmaceuticalStartDateTime"] == "20260325140000.000000"
+
+
+def test_extract_pet_tags_start_datetime_top_level_fallback(tmp_path):
+    """RadiopharmaceuticalStartDateTime is also read from the top level."""
+    ds = Dataset()
+    ds.Modality = "PT"
+    ds.RadiopharmaceuticalStartDateTime = "20260325140000"
+    ds.file_meta = pydicom.dataset.FileMetaDataset()
+    ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    ds.file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.128"
+    ds.file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid()
+    path = tmp_path / "toplevel.dcm"
+    ds.save_as(str(path))
+
+    tags = extract_pet_tags(path)
+    assert tags["RadiopharmaceuticalStartDateTime"] == "20260325140000"
 
 
 def test_extract_pet_tags_missing_tags(tmp_path):
@@ -144,6 +186,88 @@ def test_find_dicom_files_no_dcm_extension(tmp_path):
     txt = tmp_path / "notes.txt"
     txt.write_bytes(b"\x00" * 200_000)
     assert find_dicom_files(tmp_path) == []
+
+
+def _write_part10(path, size=200_000):
+    """Write a file with a valid Part 10 preamble + DICM magic."""
+    path.write_bytes(b"\x00" * 128 + b"DICM" + b"\x00" * (size - 132))
+    return path
+
+
+def test_find_dicom_files_uppercase_extension(tmp_path):
+    """PACS exports using .DCM are found (case-insensitive match)."""
+    upper = tmp_path / "IMG001.DCM"
+    upper.write_bytes(b"\x00" * 200_000)
+    mixed = tmp_path / "IMG002.Dcm"
+    mixed.write_bytes(b"\x00" * 200_000)
+
+    files = find_dicom_files(tmp_path)
+    assert files == sorted([upper, mixed])
+
+
+def test_find_dicom_files_extensionless_with_dicm_magic(tmp_path):
+    """Extensionless instances are found via the Part 10 DICM magic."""
+    plain = _write_part10(tmp_path / "IM_0001")
+    uid_named = _write_part10(tmp_path / "1.2.840.113619.2.55.3")
+
+    files = find_dicom_files(tmp_path)
+    assert files == sorted([plain, uid_named])
+
+
+def test_find_dicom_files_extensionless_without_magic_is_ignored(tmp_path):
+    """An extensionless file is not accepted on its lack of suffix alone."""
+    blob = tmp_path / "README"
+    blob.write_bytes(b"\x00" * 200_000)
+    assert find_dicom_files(tmp_path) == []
+
+
+def test_find_dicom_files_magic_still_respects_size_threshold(tmp_path):
+    """Small Part 10 files are still filtered out by the size threshold."""
+    _write_part10(tmp_path / "tiny", size=1_000)
+    assert find_dicom_files(tmp_path, size_threshold_kb=100) == []
+
+
+def test_contains_dicom_files_ignores_size_threshold(tmp_path):
+    """Format detection sees small DICOM files that find_dicom_files filters."""
+    from autods_pet.imaging.dicom import contains_dicom_files
+
+    sub = tmp_path / "series"
+    sub.mkdir()
+    _write_part10(sub / "IM_0001", size=1_000)
+
+    assert contains_dicom_files(tmp_path) is True
+    assert find_dicom_files(tmp_path, size_threshold_kb=100) == []
+
+
+def test_contains_dicom_files_false_for_non_dicom(tmp_path):
+    from autods_pet.imaging.dicom import contains_dicom_files
+
+    (tmp_path / "CT.nii.gz").write_bytes(b"\x00" * 5_000)
+    assert contains_dicom_files(tmp_path) is False
+
+
+def test_has_dicm_magic_on_missing_file(tmp_path):
+    from autods_pet.imaging.dicom import has_dicm_magic
+
+    assert has_dicm_magic(tmp_path / "nope.dcm") is False
+
+
+def test_find_series_by_modality_accepts_uppercase_extension(tmp_path):
+    """The CT/PT modality grouping works on non-.dcm-named instances."""
+    for i in range(2):
+        ds = Dataset()
+        ds.Modality = "CT"
+        ds.SeriesInstanceUID = "1.2.3.4"
+        ds.PatientID = "TEST"
+        ds.file_meta = pydicom.dataset.FileMetaDataset()
+        ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+        ds.file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.2"
+        ds.file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid()
+        ds.save_as(str(tmp_path / f"SLICE{i}.DCM"))
+
+    series = find_series_by_modality(tmp_path, size_threshold_kb=0)
+    assert len(series["CT"]) == 2
+    assert series["PT"] == []
 
 
 def test_resolve_case_insensitive(tmp_path):

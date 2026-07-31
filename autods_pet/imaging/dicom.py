@@ -49,11 +49,70 @@ def resolve_patient_folder(basepath: Path, patient_id: str) -> Path | None:
     return actual if actual is not None else None
 
 
+# Byte offset and value of the DICM magic in a Part 10 file header.
+_DICM_PREAMBLE_LEN = 128
+_DICM_MAGIC = b"DICM"
+
+
+def has_dicm_magic(path: str | Path) -> bool:
+    """Check for the ``DICM`` magic at byte offset 128 (Part 10 preamble).
+
+    Used to recognise DICOM files that PACS exports write without a
+    ``.dcm`` extension, or with an extension made of UID components.
+    Reads four bytes and never parses the dataset.
+
+    Parameters
+    ----------
+    path : str or Path
+        File to inspect.
+
+    Returns
+    -------
+    bool
+        ``True`` if the file carries the Part 10 magic.
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(_DICM_PREAMBLE_LEN)
+            return f.read(len(_DICM_MAGIC)) == _DICM_MAGIC
+    except OSError:
+        log.debug("Cannot read preamble of %s", path, exc_info=True)
+        return False
+
+
+def is_dicom_file(path: str | Path) -> bool:
+    """Return *True* if *path* looks like a DICOM instance.
+
+    A file qualifies either by carrying a case-insensitive ``.dcm``
+    extension or by carrying the Part 10 ``DICM`` magic.  The extension is
+    never required, and an empty extension is never sufficient on its own -
+    PACS exports routinely name instances ``IM_0001`` or
+    ``1.2.840.113619.2.55``, and plain ``.txt`` files of the right size
+    would otherwise be picked up.
+
+    Parameters
+    ----------
+    path : str or Path
+        File to inspect.
+
+    Returns
+    -------
+    bool
+    """
+    if Path(path).suffix.lower() == ".dcm":
+        return True
+    return has_dicm_magic(path)
+
+
 def find_dicom_files(
     patient_dir: str | Path,
     size_threshold_kb: int = 100,
 ) -> list[Path]:
-    """Recursively find ``.dcm`` files above a size threshold.
+    """Recursively find DICOM files above a size threshold.
+
+    Matching is case-insensitive on the ``.dcm`` extension and also accepts
+    extensionless (or oddly named) files that carry the Part 10 ``DICM``
+    magic, both of which are common in PACS exports.
 
     Parameters
     ----------
@@ -71,11 +130,39 @@ def find_dicom_files(
     patient_dir = Path(patient_dir)
     threshold_bytes = size_threshold_kb * 1024
     files = []
-    for f in patient_dir.rglob("*.dcm"):
-        if f.is_file() and f.stat().st_size >= threshold_bytes:
+    for f in patient_dir.rglob("*"):
+        if not f.is_file():
+            continue
+        try:
+            if f.stat().st_size < threshold_bytes:
+                continue
+        except OSError:
+            continue
+        if is_dicom_file(f):
             files.append(f)
     files.sort()
     return files
+
+
+def contains_dicom_files(directory: str | Path) -> bool:
+    """Return *True* as soon as one DICOM file is found under *directory*.
+
+    Unlike :func:`find_dicom_files` this applies no size threshold and stops
+    at the first match, so it is cheap enough for format auto-detection.
+
+    Parameters
+    ----------
+    directory : str or Path
+        Root directory to search.
+
+    Returns
+    -------
+    bool
+    """
+    directory = Path(directory)
+    if not directory.is_dir():
+        return False
+    return any(f.is_file() and is_dicom_file(f) for f in directory.rglob("*"))
 
 
 def find_series_by_modality(
@@ -143,14 +230,22 @@ def extract_pet_tags(dicom_path: str | Path) -> dict[str, Any]:
         Keys match the metadata expected by :func:`~autods_pet.pipeline.normalize_pet`:
         ``PatientID``, ``StudyDate``, ``AcquisitionTime``, ``Units``,
         ``DecayCorrection``, ``RadiopharmaceuticalStartTime``,
-        ``RadionuclideTotalDose``, ``RadionuclideHalfLife``,
-        ``SeriesInstanceUID``, ``StudyInstanceUID``.
+        ``RadiopharmaceuticalStartDateTime``, ``RadionuclideTotalDose``,
+        ``RadionuclideHalfLife``, ``SeriesInstanceUID``, ``StudyInstanceUID``.
         Missing tags are set to *None*.
+
+    Notes
+    -----
+    ``RadiopharmaceuticalStartDateTime`` (0018,1078) carries the full date
+    and time, so it survives multi-day protocols and is the only injection
+    timestamp some Enhanced PET objects populate.  It is read from the
+    nested sequence first and from the top level as a fallback.
     """
     ds = pydicom.dcmread(str(dicom_path), stop_before_pixels=True, force=True)
 
     # Radiopharmaceutical info from nested sequence
     rph_start = None
+    rph_start_dt = None
     half_life = None
     total_dose = None
 
@@ -158,6 +253,7 @@ def extract_pet_tags(dicom_path: str | Path) -> dict[str, Any]:
     if seq is not None and len(seq) > 0:
         item = seq[0]
         rph_start = _safe_get(item, "RadiopharmaceuticalStartTime")
+        rph_start_dt = _safe_get(item, "RadiopharmaceuticalStartDateTime")
         half_life = _safe_get(item, "RadionuclideHalfLife", convert=float)
         total_dose = _safe_get(item, "RadionuclideTotalDose", convert=float)
 
@@ -168,6 +264,8 @@ def extract_pet_tags(dicom_path: str | Path) -> dict[str, Any]:
         half_life = _safe_get(ds, "RadionuclideHalfLife", convert=float)
     if rph_start is None:
         rph_start = _safe_get(ds, "RadiopharmaceuticalStartTime")
+    if rph_start_dt is None:
+        rph_start_dt = _safe_get(ds, "RadiopharmaceuticalStartDateTime")
 
     return {
         "PatientID": _safe_get(ds, "PatientID"),
@@ -176,6 +274,7 @@ def extract_pet_tags(dicom_path: str | Path) -> dict[str, Any]:
         "Units": _safe_get(ds, "Units"),
         "DecayCorrection": _safe_get(ds, "DecayCorrection"),
         "RadiopharmaceuticalStartTime": rph_start,
+        "RadiopharmaceuticalStartDateTime": rph_start_dt,
         "RadionuclideTotalDose": total_dose,
         "RadionuclideHalfLife": half_life,
         "SeriesInstanceUID": _safe_get(ds, "SeriesInstanceUID"),

@@ -122,8 +122,14 @@ def list_segments(path: Path) -> list[dict[str, Any]]:
 def _select_segment_number(
     seg: Any,
     segment_label: str | None,
+    segment_number: int | None = None,
 ) -> int:
     """Resolve the segment number to extract.
+
+    *segment_number* wins when given: it is the explicit tie-breaker for
+    files whose segments share a label.  Otherwise *segment_label* is
+    matched case-insensitively, and a label carried by more than one
+    segment is reported as ambiguous rather than resolved silently.
 
     Parameters
     ----------
@@ -131,6 +137,8 @@ def _select_segment_number(
         Loaded DICOM SEG object.
     segment_label : str or None
         User-requested label (case-insensitive match).
+    segment_number : int or None
+        Explicit segment number.  Takes precedence over *segment_label*.
 
     Returns
     -------
@@ -140,31 +148,48 @@ def _select_segment_number(
     Raises
     ------
     ValueError
-        If the label is not found or is ambiguous.
+        If *segment_number* is not present in the file, if *segment_label*
+        is not found, if *segment_label* matches more than one segment, or
+        if neither is given for a multi-segment file.
     """
-    seg_nums = list(seg.segment_numbers)
-    labels_map: dict[str, int] = {}
+    seg_nums = [int(n) for n in seg.segment_numbers]
+    label_by_num: dict[int, str] = {}
+    nums_by_label: dict[str, list[int]] = {}
     for num in seg_nums:
-        desc = seg.get_segment_description(num)
-        labels_map[str(desc.segment_label)] = int(num)
+        label = str(seg.get_segment_description(num).segment_label)
+        label_by_num[num] = label
+        nums_by_label.setdefault(label.lower(), []).append(num)
+
+    available = ", ".join(f"'{label_by_num[num]}' (#{num})" for num in seg_nums)
+
+    if segment_number is not None:
+        if int(segment_number) not in seg_nums:
+            raise ValueError(
+                f"Segment number {segment_number} not found in DICOM SEG. "
+                f"Available segments: {available}"
+            )
+        return int(segment_number)
 
     if segment_label is not None:
-        # Case-insensitive lookup.
-        lower_map = {k.lower(): (k, v) for k, v in labels_map.items()}
-        key = segment_label.lower()
-        if key in lower_map:
-            return lower_map[key][1]
-        available = ", ".join(f"'{lab}' (#{num})" for lab, num in labels_map.items())
-        raise ValueError(
-            f"Segment label '{segment_label}' not found in DICOM SEG. "
-            f"Available segments: {available}"
-        )
+        matches = nums_by_label.get(segment_label.lower())
+        if not matches:
+            raise ValueError(
+                f"Segment label '{segment_label}' not found in DICOM SEG. "
+                f"Available segments: {available}"
+            )
+        if len(matches) > 1:
+            collisions = ", ".join(f"#{num}" for num in matches)
+            raise ValueError(
+                f"Segment label '{segment_label}' is ambiguous in DICOM SEG: "
+                f"it matches segments {collisions}. "
+                "Pass 'segment_number' to select one."
+            )
+        return matches[0]
 
     # No label specified.
     if len(seg_nums) == 1:
-        return int(seg_nums[0])
+        return seg_nums[0]
 
-    available = ", ".join(f"'{lab}' (#{num})" for lab, num in labels_map.items())
     raise ValueError(
         f"DICOM SEG contains {len(seg_nums)} segments: {available}. "
         "Specify 'segment_label' in the config to select one."
@@ -174,6 +199,7 @@ def _select_segment_number(
 def read_dicom_seg(
     path: Path,
     segment_label: str | None = None,
+    segment_number: int | None = None,
 ) -> Any:
     """Read a DICOM SEG file and return the selected segment as a SimpleITK image.
 
@@ -185,6 +211,10 @@ def read_dicom_seg(
         Label of the segment to extract.  Required when the file contains
         more than one segment.  Matched case-insensitively against each
         segment's ``SegmentLabel`` attribute.
+    segment_number : int or None
+        Explicit segment number, which takes precedence over
+        *segment_label*.  This is the way to disambiguate a file in which
+        several segments share the same label.
 
     Returns
     -------
@@ -197,15 +227,16 @@ def read_dicom_seg(
     ModuleNotFoundError
         If ``highdicom`` is not installed.
     ValueError
-        If the file is not a valid DICOM SEG, the requested label is not
-        found, or a multi-segment file is loaded without specifying a label.
+        If the file is not a valid DICOM SEG, the requested label or number
+        is not found, the requested label matches more than one segment, or
+        a multi-segment file is loaded without specifying either.
     """
     import SimpleITK as sitk
 
     hd = _import_highdicom()
 
     seg = hd.seg.segread(str(path))
-    seg_num = _select_segment_number(seg, segment_label)
+    seg_num = _select_segment_number(seg, segment_label, segment_number)
 
     # Handle FRACTIONAL segmentation type.
     is_fractional = seg.segmentation_type == hd.seg.SegmentationTypeValues.FRACTIONAL
@@ -259,12 +290,13 @@ def read_dicom_seg(
             f"Degenerate affine in DICOM SEG '{path.name}': "
             f"zero-length spacing vector (spacing={spacing.tolist()})."
         )
+
     direction = spacing_vecs / spacing
 
     img = sitk.GetImageFromArray(arr)
     img.SetOrigin(origin.tolist())
     img.SetSpacing(spacing.tolist())
-    img.SetDirection(direction.T.flatten().tolist())
+    img.SetDirection(direction.flatten().tolist())
     img = sitk.Cast(img, sitk.sitkUInt8)
 
     desc = seg.get_segment_description(seg_num)

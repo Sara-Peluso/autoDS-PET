@@ -327,3 +327,134 @@ def test_read_dicom_seg_preserves_custom_spacing(tmp_path: Path) -> None:
     assert sx == pytest.approx(0.75, abs=0.01)
     assert sy == pytest.approx(0.5, abs=0.01)
     assert sz == pytest.approx(3.0, abs=0.01)
+
+
+@pytest.fixture()
+def duplicate_label_seg_path(tmp_path: Path) -> Path:
+    """DICOM SEG whose two segments share the label 'Tumor'."""
+    sources = _make_source_images()
+    arr = np.zeros((4, 4, 4, 2), dtype=np.uint8)
+    arr[1:3, 1:3, 1:3, 0] = 1  # segment 1: 8-voxel cube
+    arr[0, 0, 0, 1] = 1  # segment 2: single voxel
+    seg = hd.seg.Segmentation(
+        source_images=sources,
+        pixel_array=arr,
+        segmentation_type=hd.seg.SegmentationTypeValues.BINARY,
+        segment_descriptions=[
+            _make_seg_description(1, "Tumor"),
+            _make_seg_description(2, "Tumor"),
+        ],
+        series_instance_uid=generate_uid(),
+        series_number=1,
+        sop_instance_uid=generate_uid(),
+        instance_number=1,
+        manufacturer="Test",
+        manufacturer_model_name="Test",
+        software_versions="1.0",
+        device_serial_number="0",
+        omit_empty_frames=False,
+    )
+    return _save_seg(seg, tmp_path, "duplicate_label.dcm")
+
+
+def test_duplicate_label_raises_with_colliding_numbers(
+    duplicate_label_seg_path: Path,
+) -> None:
+    """A label carried by two segments is ambiguous, not silently resolved."""
+    with pytest.raises(ValueError, match="ambiguous") as excinfo:
+        read_dicom_seg(duplicate_label_seg_path, segment_label="Tumor")
+    message = str(excinfo.value)
+    assert "#1" in message
+    assert "#2" in message
+    assert "segment_number" in message
+
+
+def test_duplicate_label_resolved_by_segment_number(
+    duplicate_label_seg_path: Path,
+) -> None:
+    """segment_number breaks the tie and selects the requested segment."""
+    first = read_dicom_seg(duplicate_label_seg_path, segment_number=1)
+    second = read_dicom_seg(duplicate_label_seg_path, segment_number=2)
+    assert sitk.GetArrayFromImage(first).sum() == 8
+    assert sitk.GetArrayFromImage(second).sum() == 1
+
+
+def test_segment_number_takes_precedence_over_label(multi_seg_path: Path) -> None:
+    """When both are given, segment_number decides."""
+    img = read_dicom_seg(multi_seg_path, segment_label="Tumor", segment_number=2)
+    # Segment 2 ('Necrosis') is the single-voxel one.
+    assert sitk.GetArrayFromImage(img).sum() == 1
+
+
+def test_unknown_segment_number_raises(single_seg_path: Path) -> None:
+    with pytest.raises(ValueError, match="Segment number 7 not found"):
+        read_dicom_seg(single_seg_path, segment_number=7)
+
+
+def test_unique_label_still_resolves_without_segment_number(
+    multi_seg_path: Path,
+) -> None:
+    """Unique labels keep working exactly as before."""
+    img = read_dicom_seg(multi_seg_path, segment_label="necrosis")
+    assert sitk.GetArrayFromImage(img).sum() == 1
+
+
+def test_read_dicom_seg_non_diagonal_direction(tmp_path: Path) -> None:
+    """An in-plane rotated SEG keeps its axis unit vectors and coordinates.
+
+    ``ImageOrientationPatient = [0, 1, 0, -1, 0, 0]`` gives a non-symmetric
+    direction matrix, so a transposed direction would silently swap the i
+    and j axes.  This is the case that shows up in reformatted or
+    externally authored SEG objects.
+    """
+    orientation = [0, 1, 0, -1, 0, 0]
+    sources = _make_source_images(orientation=orientation, slice_thickness=2.0)
+    arr = np.zeros((4, 4, 4), dtype=np.uint8)
+    arr[0, 0, 1] = 1  # slice 0, row 0, column 1
+    seg = hd.seg.Segmentation(
+        source_images=sources,
+        pixel_array=arr,
+        segmentation_type=hd.seg.SegmentationTypeValues.BINARY,
+        segment_descriptions=[_make_seg_description(1, "ROI")],
+        series_instance_uid=generate_uid(),
+        series_number=1,
+        sop_instance_uid=generate_uid(),
+        instance_number=1,
+        manufacturer="Test",
+        manufacturer_model_name="Test",
+        software_versions="1.0",
+        device_serial_number="0",
+        omit_empty_frames=False,
+    )
+    path = _save_seg(seg, tmp_path, "rotated.dcm")
+    img = read_dicom_seg(path)
+
+    # Columns of the direction matrix are the (i, j, k) axis unit vectors:
+    # i = column direction, j = row direction, k = slice normal.  highdicom
+    # hands back the volume with slices ordered against +z, hence k = -z.
+    direction = np.asarray(img.GetDirection(), dtype=float).reshape(3, 3)
+    np.testing.assert_allclose(direction[:, 0], [0, 1, 0], atol=1e-6)
+    np.testing.assert_allclose(direction[:, 1], [-1, 0, 0], atol=1e-6)
+    np.testing.assert_allclose(direction[:, 2], [0, 0, -1], atol=1e-6)
+
+    # Physical coordinates therefore follow the rotated axes.
+    origin = np.asarray(img.GetOrigin())
+    np.testing.assert_allclose(origin, [0, 0, 6], atol=1e-6)
+    np.testing.assert_allclose(
+        img.TransformIndexToPhysicalPoint((1, 0, 0)), origin + [0, 1, 0], atol=1e-6
+    )
+    np.testing.assert_allclose(
+        img.TransformIndexToPhysicalPoint((0, 1, 0)), origin + [-1, 0, 0], atol=1e-6
+    )
+    np.testing.assert_allclose(
+        img.TransformIndexToPhysicalPoint((0, 0, 1)), origin + [0, 0, -2], atol=1e-6
+    )
+
+    # The single set voxel was written at (slice 0, row 0, column 1), i.e.
+    # one column step from the source origin -> physical (0, 1, 0).
+    out = sitk.GetArrayFromImage(img)
+    assert out.sum() == 1
+    kk, jj, ii = (int(v[0]) for v in np.nonzero(out))
+    np.testing.assert_allclose(
+        img.TransformIndexToPhysicalPoint((ii, jj, kk)), [0, 1, 0], atol=1e-6
+    )

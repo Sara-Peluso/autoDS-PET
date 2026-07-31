@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from rich.console import Console
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 def setup_logging(

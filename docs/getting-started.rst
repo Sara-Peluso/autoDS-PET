@@ -5,10 +5,20 @@ Prerequisites
 -------------
 
 * Python >= 3.10
-* `TotalSegmentator <https://github.com/wasserth/TotalSegmentator>`_ for CT
-  segmentation (``pip install TotalSegmentator``)
-* **Elastix / SimpleElastix** for PET-to-CT registration
-  (``pip install SimpleITK-SimpleElastix`` -- replaces the plain ``SimpleITK`` package)
+
+`TotalSegmentator <https://github.com/wasserth/TotalSegmentator>`_ (CT
+segmentation) and ``SimpleITK-SimpleElastix`` (PET-to-CT registration, in
+place of the plain ``SimpleITK`` package) are **core dependencies**: both
+are installed automatically by ``pip install autods-pet``, so there is
+nothing to install separately.
+
+The one genuinely manual step is the TotalSegmentator licence and its
+model weights.  The ``total`` task needs no licence, but the
+``vertebrae_body`` task behind Bone Marrow DS (``BM_DS``) does: request a
+key from the TotalSegmentator authors and put it in the
+``license`` key of the ``[totalsegmentator]`` config section, which
+applies it via ``totalseg_set_license``.  Model weights are downloaded on
+first use, so the first run needs network access.
 
 Installation
 ------------

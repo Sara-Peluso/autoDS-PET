@@ -4,7 +4,7 @@
 
 # autoDS-PET
 
-**Automated Deauville Score computation from PET/CT images**
+**Automatic and semi-automatic Deauville Score computation from PET/CT images**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-0dafb5?logo=python&logoColor=white)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-0dafb5)](LICENSE)
@@ -77,9 +77,9 @@ which enables reading `.dcm` segmentation objects produced by tools like
 NIfTI (`.nii`, `.nii.gz`) and NRRD (`.nrrd`) masks are still fully supported.
 
 > [!NOTE]
-> **External tools required:**
-> - [TotalSegmentator](https://github.com/wasserth/TotalSegmentator) for CT segmentation
-> - Elastix / SimpleElastix for PET-to-CT registration
+> [TotalSegmentator](https://github.com/wasserth/TotalSegmentator) (CT segmentation) and SimpleITK-SimpleElastix (PET-to-CT registration) are core dependencies and arrive with `pip install autods-pet`, so there is nothing to install separately.
+>
+> The one manual step is the **TotalSegmentator licence**: the `total` task needs none, but the `vertebrae_body` task behind `BM_DS` does. Put the key in the `license` field of the `[totalsegmentator]` config section. Model weights are downloaded on first use.
 
 ## Quick Start
 
@@ -277,10 +277,17 @@ Full documentation is available at **[autods-pet.readthedocs.io](https://autods-
 
 ## Citation
 
-_Available soon._
+If you use autoDS-PET in your research, please cite:
+
+> Peluso S, Polizzi S, Pagnini L, Tarozzi M, Rocchi E, Dragonetti V, Solli V, Dall'Olio D, Talarico M, Terragna C, Sala C, Zamagni E, Fanti S, Nanni C, Castellani G. Automated Deauville Score computation from baseline [18F]FDG PET/CT predicts progression-free survival in multiple myeloma: a radiogenomic framework. *European Journal of Nuclear Medicine and Molecular Imaging.* 2026. doi:[10.1007/s00259-026-08103-x](https://doi.org/10.1007/s00259-026-08103-x)
 
 ```bibtex
-@article{
+@article{peluso2026autodspet,
+  title   = {Automated Deauville Score computation from baseline [18F]FDG PET/CT predicts progression-free survival in multiple myeloma: a radiogenomic framework},
+  author  = {Peluso, Sara and Polizzi, Stefano and Pagnini, Lisa and Tarozzi, Martina and Rocchi, Ettore and Dragonetti, Valentino and Solli, Vincenza and Dall'Olio, Daniele and Talarico, Marco and Terragna, Carolina and Sala, Claudia and Zamagni, Elena and Fanti, Stefano and Nanni, Cristina and Castellani, Gastone},
+  journal = {European Journal of Nuclear Medicine and Molecular Imaging},
+  year    = {2026},
+  doi     = {10.1007/s00259-026-08103-x}
 }
 ```
 

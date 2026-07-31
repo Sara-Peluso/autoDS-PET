@@ -167,6 +167,94 @@ def test_score_command(tmp_path):
     mock_score.assert_called_once()
 
 
+def test_extract_runs_on_target_free_config(tmp_path):
+    """A config with no target sections still extracts (the real gate is used)."""
+    cfg = _default_cfg(tmp_path)
+    with (
+        patch("autods_pet.cli._load_and_resolve", return_value=(cfg, ["P001"])),
+        patch("autods_pet.cli._init_logging"),
+        patch("autods_pet.patient.PatientCase"),
+        patch(
+            "autods_pet.pipeline.extract_rois",
+            return_value={"_roi_statuses": []},
+        ) as mock_ext,
+        patch("autods_pet.pipeline.write_patient_suv_csv"),
+    ):
+        result = runner.invoke(app, ["extract", "-c", "fake.ini", "-p", "P001"])
+
+    assert result.exit_code == 0
+    mock_ext.assert_called_once()
+
+
+def test_score_runs_on_target_free_config(tmp_path):
+    """A config with no target sections still scores (the real gate is used)."""
+    cfg = _default_cfg(tmp_path)
+    with (
+        patch("autods_pet.cli._load_and_resolve", return_value=(cfg, ["P001"])),
+        patch("autods_pet.cli._init_logging"),
+        patch("autods_pet.patient.PatientCase"),
+        patch(
+            "autods_pet.pipeline.extract_rois",
+            return_value={"_roi_statuses": []},
+        ) as mock_ext,
+        patch(
+            "autods_pet.pipeline.score_deauville", return_value={"LB_DS": 3}
+        ) as mock_score,
+        patch("autods_pet.pipeline.write_patient_suv_csv"),
+        patch("autods_pet.pipeline.write_patient_deauville_csv"),
+    ):
+        result = runner.invoke(app, ["score", "-c", "fake.ini", "-p", "P001"])
+
+    assert result.exit_code == 0
+    mock_ext.assert_called_once()
+    mock_score.assert_called_once()
+
+
+def test_extract_skipped_when_configured_target_has_no_new_mask(tmp_path):
+    """With a target configured but no new mask, the patient is still skipped."""
+    cfg = _default_cfg(tmp_path)
+    cfg["focal_lesion"] = {"mask_filename": ["focal_lesion"], "stats": ["max"]}
+    with (
+        patch("autods_pet.cli._load_and_resolve", return_value=(cfg, ["P001"])),
+        patch("autods_pet.cli._init_logging"),
+        patch("autods_pet.patient.PatientCase"),
+        patch("autods_pet.pipeline._has_new_target_masks", return_value=False),
+        patch("autods_pet.pipeline.extract_rois") as mock_ext,
+        patch("autods_pet.pipeline.write_patient_suv_csv"),
+    ):
+        result = runner.invoke(app, ["extract", "-c", "fake.ini", "-p", "P001"])
+
+    assert result.exit_code == 0
+    mock_ext.assert_not_called()
+
+
+@pytest.mark.parametrize("command", ["extract", "score"])
+def test_force_sets_pipeline_force_flag(tmp_path, command):
+    """--force propagates into cfg['pipeline']['force'] so caches are bypassed."""
+    cfg = _default_cfg(tmp_path)
+    captured: dict = {}
+
+    def _capture_extract_rois(c, p):
+        captured.update(c)
+        return {"_roi_statuses": []}
+
+    with (
+        patch("autods_pet.cli._load_and_resolve", return_value=(cfg, ["P001"])),
+        patch("autods_pet.cli._init_logging"),
+        patch("autods_pet.patient.PatientCase"),
+        patch("autods_pet.pipeline.extract_rois", side_effect=_capture_extract_rois),
+        patch("autods_pet.pipeline.score_deauville", return_value={}),
+        patch("autods_pet.pipeline.write_patient_suv_csv"),
+        patch("autods_pet.pipeline.write_patient_deauville_csv"),
+    ):
+        result = runner.invoke(
+            app, [command, "-c", "fake.ini", "-p", "P001", "--force"]
+        )
+
+    assert result.exit_code == 0
+    assert captured.get("pipeline", {}).get("force") is True
+
+
 def test_run_single_patient(tmp_path):
     cfg = _default_cfg(tmp_path)
     output_dir = tmp_path / "results"

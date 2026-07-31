@@ -29,18 +29,12 @@ def _uniform_pet(value, size=20):
     return img
 
 
-# -- Constructor defaults ---------------------------------------------
-
-
 def test_brain_defaults():
     roi = BrainROI()
     assert roi.brain_label == labels.BRAIN
     assert roi.grey_matter_only is True
     assert roi.cortical_thickness_mm == 5.0
     assert roi.stats == ["median"]
-
-
-# -- refine() ---------------------------------------------------------
 
 
 def test_refine_grey_matter_cortical_shell():
@@ -98,9 +92,6 @@ def test_refine_no_brain_label_returns_none():
     roi = BrainROI()
     result = roi.refine(seg)
     assert result is None
-
-
-# -- extract() --------------------------------------------------------
 
 
 def test_extract_computes_stats():

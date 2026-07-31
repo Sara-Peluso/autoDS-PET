@@ -108,12 +108,15 @@ _TYPED_KEYS: dict[tuple[str, str], str] = {
     ("focal_lesion", "stats"): "str_list",
     ("focal_lesion", "mask_filename"): "str_list",
     ("focal_lesion", "segment_label"): "str_list",
+    ("focal_lesion", "scoring_stat"): "str",
     ("paramedullary", "stats"): "str_list",
     ("paramedullary", "mask_filename"): "str_list",
     ("paramedullary", "segment_label"): "str_list",
+    ("paramedullary", "scoring_stat"): "str",
     ("extramedullary", "stats"): "str_list",
     ("extramedullary", "mask_filename"): "str_list",
     ("extramedullary", "segment_label"): "str_list",
+    ("extramedullary", "scoring_stat"): "str",
     ("deauville", "liver_multiplier"): "float",
     ("dicom", "size_threshold_kb"): "int",
     ("totalsegmentator", "fast"): "bool",
@@ -150,9 +153,16 @@ _TARGET_TYPED_KEYS: dict[str, str] = {
     "stats": "str_list",
     "mask_filename": "str_list",
     "segment_label": "str_list",
+    "scoring_stat": "str",
 }
 
-# -- Profile definitions -------------------------------------------------
+# Default statistic used to score the named lesion sections.
+# Override per section with ``scoring_stat``.
+DEFAULT_LESION_SCORING_STAT = "max"
+
+# Default statistic used to score a custom [targets.*] section.
+# Override per section with ``scoring_stat``.
+DEFAULT_CUSTOM_TARGET_SCORING_STAT = "p95"
 
 _PROFILE_DESCRIPTIONS: dict[str, str] = {
     "quick": (
@@ -467,6 +477,50 @@ def get_all_targets(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     return targets
 
 
+def get_scoring_stat(target_cfg: dict[str, Any]) -> str:
+    """Return the statistic used to assign a Deauville Score to a target.
+
+    An explicit ``scoring_stat`` key always wins, so any statistic can be
+    used for scoring.  Without one, the default depends on the kind of
+    section: named lesion sections use
+    :data:`DEFAULT_LESION_SCORING_STAT` (``"max"``, the clinical reading of
+    a focal lesion) and custom ``[targets.*]`` sections use
+    :data:`DEFAULT_CUSTOM_TARGET_SCORING_STAT` (``"p95"``, matching the
+    diffuse marrow ROIs).
+
+    The chosen statistic is computed whether or not it appears in
+    ``stats``, so ``stats`` only controls what else is reported.
+
+    Parameters
+    ----------
+    target_cfg : dict
+        A single entry from :func:`get_all_targets`.
+
+    Returns
+    -------
+    str
+        Statistic name (e.g. ``"max"``, ``"p95"``, ``"p90"``).
+
+    Examples
+    --------
+    >>> from autods_pet.config import get_scoring_stat
+    >>> get_scoring_stat({"name": "focal_lesion", "stats": ["p90"]})
+    'max'
+    >>> get_scoring_stat({"name": "focal_lesion", "scoring_stat": "p90"})
+    'p90'
+    >>> get_scoring_stat({"name": "my_roi", "stats": ["mean"]})
+    'p95'
+    >>> get_scoring_stat({"name": "my_roi", "scoring_stat": "max"})
+    'max'
+    """
+    raw = target_cfg.get("scoring_stat")
+    if raw is not None and str(raw).strip():
+        return str(raw).strip()
+    if target_cfg.get("name") in NAMED_TARGET_SECTIONS:
+        return DEFAULT_LESION_SCORING_STAT
+    return DEFAULT_CUSTOM_TARGET_SCORING_STAT
+
+
 @dataclasses.dataclass
 class ValidationIssue:
     """A single validation problem found in a configuration."""
@@ -504,8 +558,6 @@ class ConfigValidator:
         self._cfg = cfg
         self.issues: list[ValidationIssue] = []
 
-    # -- helpers ----------------------------------------------------------
-
     def _add(
         self,
         section: str,
@@ -514,8 +566,6 @@ class ConfigValidator:
         message: str,
     ) -> None:
         self.issues.append(ValidationIssue(section, key, level, message))
-
-    # -- public API -------------------------------------------------------
 
     @property
     def errors(self) -> list[ValidationIssue]:
@@ -541,8 +591,6 @@ class ConfigValidator:
         self._check_roi_sections()
         self._check_custom_targets()
         return self.issues
-
-    # -- internal checks --------------------------------------------------
 
     def _check_stats(self, section: str, values: dict[str, Any]) -> bool:
         """Validate stats presence and names. Returns True if stats are valid."""
@@ -599,6 +647,7 @@ class ConfigValidator:
                 )
         elif section in NAMED_TARGET_SECTIONS:
             self._check_target_identity(section, values)
+            self._check_scoring_stat(section, values)
 
     def _check_roi_sections(self) -> None:
         cfg = self._cfg
@@ -665,6 +714,17 @@ class ConfigValidator:
                         parse_stat(s)
                     except ValueError as exc:
                         self._add(f"targets.{target_name}", "stats", "error", str(exc))
+            self._check_scoring_stat(f"targets.{target_name}", target_cfg)
+
+    def _check_scoring_stat(self, section: str, values: dict[str, Any]) -> None:
+        """Validate the optional ``scoring_stat`` key of a target section."""
+        raw = values.get("scoring_stat")
+        if raw is None or not str(raw).strip():
+            return
+        try:
+            parse_stat(str(raw).strip())
+        except ValueError as exc:
+            self._add(section, "scoring_stat", "error", str(exc))
 
     def _check_non_negative(self, d: dict[str, Any], key: str, section: str) -> None:
         val = d.get(key)
@@ -782,6 +842,16 @@ _TARGET_DOC = [
     ";   Set either, both, or neither.  DICOM SEG wins when both formats",
     ";   match the same target for the same patient.  Geometry is",
     ";   auto-detected and PET-space masks are auto-registered to CT.",
+    ";",
+    ";   - scoring_stat  : the single statistic the Deauville Score is",
+    ";                     computed from.  Optional.  Defaults to 'max'",
+    ";                     for the lesion sections below (Deauville is",
+    ";                     read off the most intense uptake) and to",
+    ";                     'p95' for [targets.*] sections (treated as",
+    ";                     diffuse uptake, like the marrow ROIs).  It is",
+    ";                     always computed, whether or not it appears in",
+    ";                     'stats'; everything else in 'stats' is only",
+    ";                     reported in SUV_values.csv.",
 ]
 
 
@@ -806,7 +876,8 @@ def _write_target_sections(lines: list[str], targets_enabled: bool) -> None:
     lines.append("; [targets.my_custom_roi]")
     lines.append("; mask_filename = my_roi")
     lines.append("; segment_label = my tumor label")
-    lines.append("; stats = max, median")
+    lines.append("; stats = p95, max")
+    lines.append("; scoring_stat = p95")
     lines.append("")
 
 

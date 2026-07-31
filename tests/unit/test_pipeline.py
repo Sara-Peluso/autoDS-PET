@@ -21,6 +21,13 @@ from autods_pet.pipeline import (
 from autods_pet.results import ROIResult
 
 
+def _fake_mask_image():
+    """MagicMock standing in for a 3D sitk.Image mask."""
+    img = MagicMock()
+    img.GetDimension.return_value = 3
+    return img
+
+
 @pytest.fixture()
 def mock_patient(tmp_path):
     """MagicMock imitating a PatientCase with tmp_path-based paths."""
@@ -182,6 +189,104 @@ def test_normalize_pet_no_metadata_raises(mock_patient):
     cfg = {"paths": {}}
     with pytest.raises(ValueError, match="No PET metadata"):
         normalize_pet(cfg, mock_patient)
+
+
+def _normalize_and_capture_dose(mock_patient, metadata):
+    """Run normalize_pet on *metadata* and return the SUV denominator used."""
+    mock_patient.metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    mock_patient.metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    mock_patient.pet_suv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    captured = {}
+
+    def _capture_suvbw(pet, weight_kg, dose_bq):
+        captured["dose_bq"] = dose_bq
+        return MagicMock()
+
+    with (
+        patch("SimpleITK.ReadImage", return_value=MagicMock()),
+        patch(
+            "autods_pet.imaging.normalization.compute_suvbw", side_effect=_capture_suvbw
+        ),
+        patch("SimpleITK.WriteImage"),
+    ):
+        result = normalize_pet({}, mock_patient)
+
+    assert result["skipped"] is False
+    return captured["dose_bq"]
+
+
+def test_normalize_pet_uses_start_datetime_when_start_time_absent(mock_patient):
+    """Enhanced PET objects that only populate 0018,1078 still normalize.
+
+    The injection is one hour before acquisition, so the START denominator
+    is the dose decayed by exactly 3600 s.
+    """
+    from autods_pet.imaging.normalization import decay_dose
+
+    metadata = {
+        "StudyDate": "20230101",
+        "AcquisitionTime": "120000",
+        "RadiopharmaceuticalStartTime": None,
+        "RadiopharmaceuticalStartDateTime": "20230101110000.000000",
+        "RadionuclideTotalDose": 370000000.0,
+        "RadionuclideHalfLife": 6586.2,
+        "DecayCorrection": "START",
+        "PatientWeight": 70.0,
+    }
+    dose = _normalize_and_capture_dose(mock_patient, metadata)
+    assert dose == pytest.approx(decay_dose(370000000.0, 6586.2, 3600.0))
+
+
+def test_normalize_pet_start_datetime_spans_midnight(mock_patient):
+    """A same-day StudyDate with a previous-day injection keeps the real gap."""
+    from autods_pet.imaging.normalization import decay_dose
+
+    metadata = {
+        "StudyDate": "20230102",
+        "AcquisitionTime": "003000",
+        "RadiopharmaceuticalStartDateTime": "20230101233000",
+        "RadionuclideTotalDose": 370000000.0,
+        "RadionuclideHalfLife": 6586.2,
+        "DecayCorrection": "START",
+        "PatientWeight": 70.0,
+    }
+    dose = _normalize_and_capture_dose(mock_patient, metadata)
+    assert dose == pytest.approx(decay_dose(370000000.0, 6586.2, 3600.0))
+
+
+def test_normalize_pet_start_datetime_with_utc_offset(mock_patient):
+    """A DT value carrying a UTC offset suffix is parsed, not rejected."""
+    from autods_pet.imaging.normalization import decay_dose
+
+    metadata = {
+        "StudyDate": "20230101",
+        "AcquisitionTime": "120000",
+        "RadiopharmaceuticalStartDateTime": "20230101110000.000000+0200",
+        "RadionuclideTotalDose": 370000000.0,
+        "RadionuclideHalfLife": 6586.2,
+        "DecayCorrection": "START",
+        "PatientWeight": 70.0,
+    }
+    dose = _normalize_and_capture_dose(mock_patient, metadata)
+    assert dose == pytest.approx(decay_dose(370000000.0, 6586.2, 3600.0))
+
+
+def test_normalize_pet_no_injection_time_raises(mock_patient):
+    """Neither injection tag present gives a clear error, not a parse crash."""
+    metadata = {
+        "StudyDate": "20230101",
+        "AcquisitionTime": "120000",
+        "RadionuclideTotalDose": 370000000.0,
+        "RadionuclideHalfLife": 6586.2,
+        "DecayCorrection": "START",
+        "PatientWeight": 70.0,
+    }
+    mock_patient.metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    mock_patient.metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="No usable injection time"):
+        normalize_pet({}, mock_patient)
 
 
 def test_normalize_pet_reads_json_and_computes(mock_patient):
@@ -414,35 +519,110 @@ def test_score_deauville_missing_liver_returns_empty():
     assert scores == {}
 
 
-def test_score_deauville_custom_target_scored():
-    """Custom target ROI gets a Deauville Score."""
-    from autods_pet.pipeline import score_deauville
-    from autods_pet.results import ROIResult
-
-    extract_results = {
+def _refs():
+    """Aorta MBP and Liver references sufficient to enable scoring."""
+    return {
         "Aorta MBP": ROIResult(stats={"median": 2.0}),
         "Liver": ROIResult(stats={"median": 3.0}),
-        "MyCustomROI": ROIResult(stats={"max": 10.0}),
     }
-    scores = score_deauville({}, extract_results)
-    assert "MyCustomROI" in scores
-    assert scores["MyCustomROI"] in {2, 3, 4, 5}
 
 
-def test_score_deauville_stat_priority_order():
-    """Target stat selection follows priority: max > p95 > median > mean."""
+def test_score_deauville_custom_target_defaults_to_p95():
+    """A custom target is diffuse by assumption, so it scores on p95."""
     from autods_pet.pipeline import score_deauville
-    from autods_pet.results import ROIResult
 
-    # Focal lesion has only "mean" stat - it should still be used
     extract_results = {
-        "Aorta MBP": ROIResult(stats={"median": 2.0}),
-        "Liver": ROIResult(stats={"median": 3.0}),
-        "Focal lesion": ROIResult(stats={"mean": 5.0}),
+        **_refs(),
+        # p95 -> DS 4 (above liver), max -> DS 5 (above 2x liver).
+        "MyCustomROI": ROIResult(stats={"p95": 4.0, "max": 10.0}),
     }
     scores = score_deauville({}, extract_results)
-    assert "FL_DS" in scores
-    assert scores["FL_DS"] in {2, 3, 4, 5}
+    assert scores["MyCustomROI"] == 4
+
+
+def test_score_deauville_custom_target_honours_scoring_stat():
+    """scoring_stat overrides the p95 default for a custom target."""
+    from autods_pet.pipeline import score_deauville
+
+    cfg = {"targets": {"MyCustomROI": {"stats": ["p95", "max"], "scoring_stat": "max"}}}
+    extract_results = {
+        **_refs(),
+        "MyCustomROI": ROIResult(stats={"p95": 4.0, "max": 10.0}),
+    }
+    scores = score_deauville(cfg, extract_results)
+    assert scores["MyCustomROI"] == 5
+
+
+def test_score_deauville_custom_target_missing_scoring_stat_warns(caplog):
+    """A custom target without its scoring stat is reported, not dropped silently."""
+    import logging
+
+    from autods_pet.pipeline import score_deauville
+
+    extract_results = {**_refs(), "MyCustomROI": ROIResult(stats={"mean": 10.0})}
+    with caplog.at_level(logging.WARNING):
+        scores = score_deauville({}, extract_results)
+
+    assert "MyCustomROI" not in scores
+    assert "no 'p95' statistic" in caplog.text
+    assert "scoring_stat" in caplog.text
+
+
+def test_score_deauville_named_target_defaults_to_max():
+    """Lesions are read off their most intense uptake by default."""
+    from autods_pet.pipeline import score_deauville
+
+    extract_results = {
+        **_refs(),
+        "Focal lesion": ROIResult(stats={"p90": 4.0, "max": 10.0}),
+    }
+    scores = score_deauville({}, extract_results)
+    assert scores["FL_DS"] == 5
+
+
+def test_score_deauville_named_target_honours_scoring_stat():
+    """scoring_stat lets a lesion be scored on any statistic."""
+    from autods_pet.pipeline import score_deauville
+
+    cfg = {"focal_lesion": {"stats": ["max", "p90"], "scoring_stat": "p90"}}
+    extract_results = {
+        **_refs(),
+        "Focal lesion": ROIResult(stats={"p90": 4.0, "max": 10.0}),
+    }
+    scores = score_deauville(cfg, extract_results)
+    assert scores["FL_DS"] == 4
+
+
+def test_score_deauville_named_target_missing_max_warns(caplog):
+    """A lesion whose stats lack max is reported, not dropped silently."""
+    import logging
+
+    from autods_pet.pipeline import score_deauville
+
+    extract_results = {**_refs(), "Focal lesion": ROIResult(stats={"mean": 5.0})}
+    with caplog.at_level(logging.WARNING):
+        scores = score_deauville({}, extract_results)
+
+    assert "FL_DS" not in scores
+    assert "no 'max' statistic" in caplog.text
+    assert "scoring_stat" in caplog.text
+
+
+def test_score_deauville_section_name_no_longer_changes_the_rule():
+    """The same stats and the same scoring_stat give the same score either way."""
+    from autods_pet.pipeline import score_deauville
+
+    stats = {"median": 3.5, "max": 9.0}
+
+    named = score_deauville(
+        {"focal_lesion": {"scoring_stat": "max"}},
+        {**_refs(), "Focal lesion": ROIResult(stats=stats)},
+    )
+    custom = score_deauville(
+        {"targets": {"lesion_like": {"scoring_stat": "max"}}},
+        {**_refs(), "lesion_like": ROIResult(stats=stats)},
+    )
+    assert named["FL_DS"] == custom["lesion_like"]
 
 
 def test_extract_rois_no_vb_seg_skips_lumbar(mock_patient):
@@ -547,7 +727,7 @@ def test_extract_targets_named_and_custom(mock_patient):
 
     fake_roi_result = MagicMock()
     with (
-        _patch("SimpleITK.ReadImage", return_value=MagicMock()),
+        _patch("SimpleITK.ReadImage", return_value=_fake_mask_image()),
         _patch(
             "autods_pet.roi.target_roi.TargetROI.extract",
             return_value=fake_roi_result,
@@ -567,6 +747,105 @@ def test_extract_targets_named_and_custom(mock_patient):
     ok_names = [s[0] for s in statuses if s[1] == "ok"]
     assert "Focal lesion" in ok_names
     assert "custom_roi" in ok_names
+
+
+def test_resolve_mask_geometry_rejects_2d_mask(mock_patient):
+    """A 2D mask fails with an actionable message, not an IndexError."""
+    import numpy as np
+    import SimpleITK as sitk
+
+    from autods_pet.pipeline import _resolve_mask_geometry
+
+    mask_2d = sitk.GetImageFromArray(np.ones((4, 4), dtype=np.uint8))
+    pet = sitk.GetImageFromArray(np.ones((4, 4, 4), dtype=np.float64))
+
+    with pytest.raises(ValueError, match="mask is 2D"):
+        _resolve_mask_geometry(mask_2d, pet, mock_patient, "Focal lesion")
+
+
+def test_resolve_mask_geometry_accepts_single_slice_3d_mask(mock_patient):
+    """A single slice saved as a 3D volume is resampled, not rejected."""
+    import numpy as np
+    import SimpleITK as sitk
+
+    from autods_pet.pipeline import _resolve_mask_geometry
+
+    pet = sitk.GetImageFromArray(np.ones((4, 4, 4), dtype=np.float64))
+    mask = sitk.GetImageFromArray(np.ones((1, 4, 4), dtype=np.uint8))
+
+    with patch("SimpleITK.ReadImage", return_value=pet):
+        result = _resolve_mask_geometry(mask, pet, mock_patient, "Focal lesion")
+
+    assert result.GetSize() == pet.GetSize()
+
+
+def test_extract_targets_always_computes_the_scoring_stat(mock_patient):
+    """The scoring statistic is computed even when stats omits it."""
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as _patch
+
+    from autods_pet.config import default_config
+    from autods_pet.pipeline import _extract_targets
+
+    cfg = default_config()
+    cfg["focal_lesion"] = {"mask_filename": "focal_lesion", "stats": ["p90"]}
+    cfg["targets"] = {"custom_roi": {"mask_filename": "custom", "stats": ["mean"]}}
+
+    input_dir = mock_patient.input_dir
+    input_dir.mkdir(parents=True, exist_ok=True)
+    (input_dir / "focal_lesion.nii").write_bytes(b"fake")
+    (input_dir / "custom.nii").write_bytes(b"fake")
+
+    requested: list[list[str]] = []
+
+    def _record_init(self, stats=None):
+        requested.append(list(stats or []))
+        self.stats = stats
+
+    with (
+        _patch("SimpleITK.ReadImage", return_value=_fake_mask_image()),
+        _patch("autods_pet.roi.target_roi.TargetROI.__init__", _record_init),
+        _patch("autods_pet.roi.target_roi.TargetROI.extract", return_value=MagicMock()),
+        _patch("SimpleITK.WriteImage"),
+        _patch("autods_pet.imaging.geometry.check_same_geometry", return_value=True),
+    ):
+        _extract_targets(cfg, MagicMock(), mock_patient)
+
+    assert ["p90", "max"] in requested
+    assert ["mean", "p95"] in requested
+
+
+def test_extract_targets_does_not_duplicate_the_scoring_stat(mock_patient):
+    """An already-listed scoring stat is not appended twice."""
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as _patch
+
+    from autods_pet.config import default_config
+    from autods_pet.pipeline import _extract_targets
+
+    cfg = default_config()
+    cfg["focal_lesion"] = {"mask_filename": "focal_lesion", "stats": ["max", "p90"]}
+
+    input_dir = mock_patient.input_dir
+    input_dir.mkdir(parents=True, exist_ok=True)
+    (input_dir / "focal_lesion.nii").write_bytes(b"fake")
+
+    requested: list[list[str]] = []
+
+    def _record_init(self, stats=None):
+        requested.append(list(stats or []))
+        self.stats = stats
+
+    with (
+        _patch("SimpleITK.ReadImage", return_value=_fake_mask_image()),
+        _patch("autods_pet.roi.target_roi.TargetROI.__init__", _record_init),
+        _patch("autods_pet.roi.target_roi.TargetROI.extract", return_value=MagicMock()),
+        _patch("SimpleITK.WriteImage"),
+        _patch("autods_pet.imaging.geometry.check_same_geometry", return_value=True),
+    ):
+        _extract_targets(cfg, MagicMock(), mock_patient)
+
+    assert requested == [["max", "p90"]]
 
 
 def test_extract_targets_missing_masks_skip(mock_patient):
@@ -608,7 +887,7 @@ def test_extract_targets_extraction_error(mock_patient):
     (input_dir / "focal_lesion.nii").write_bytes(b"fake")
 
     with (
-        _patch("SimpleITK.ReadImage", return_value=MagicMock()),
+        _patch("SimpleITK.ReadImage", return_value=_fake_mask_image()),
         _patch(
             "autods_pet.roi.target_roi.TargetROI.extract",
             side_effect=RuntimeError("bad mask"),
@@ -1830,7 +2109,7 @@ def test_extract_new_targets_only_with_cache(mock_patient):
 
     target_result = ROIResult(stats={"max": 5.0})
     with (
-        _patch("SimpleITK.ReadImage", return_value=MagicMock()),
+        _patch("SimpleITK.ReadImage", return_value=_fake_mask_image()),
         _patch(
             "autods_pet.pipeline._extract_targets",
             return_value=({"Focal lesion": target_result}, []),
@@ -1917,7 +2196,7 @@ def test_extract_targets_uses_discovery(mock_patient):
 
     fake_roi_result = MagicMock()
     with (
-        _patch("SimpleITK.ReadImage", return_value=MagicMock()),
+        _patch("SimpleITK.ReadImage", return_value=_fake_mask_image()),
         _patch(
             "autods_pet.roi.target_roi.TargetROI.extract",
             return_value=fake_roi_result,
@@ -1936,7 +2215,7 @@ def test_extract_targets_uses_discovery(mock_patient):
 
 
 def test_extract_command_skips_when_no_new_masks(tmp_path):
-    """extract command skips patients with no new target masks."""
+    """extract command skips patients whose configured targets have no new masks."""
     from unittest.mock import patch as _patch
 
     from typer.testing import CliRunner
@@ -1949,6 +2228,7 @@ def test_extract_command_skips_when_no_new_masks(tmp_path):
             "basepath": str(tmp_path),
             "output_dir": str(tmp_path / "results"),
         },
+        "focal_lesion": {"mask_filename": ["focal_lesion"], "stats": ["max"]},
     }
 
     with (
@@ -2003,7 +2283,7 @@ def test_extract_command_force_bypasses_check(tmp_path):
 
 
 def test_score_command_skips_when_no_new_masks(tmp_path):
-    """score command skips patients with no new target masks."""
+    """score command skips patients whose configured targets have no new masks."""
     from unittest.mock import patch as _patch
 
     from typer.testing import CliRunner
@@ -2016,6 +2296,7 @@ def test_score_command_skips_when_no_new_masks(tmp_path):
             "basepath": str(tmp_path),
             "output_dir": str(tmp_path / "results"),
         },
+        "focal_lesion": {"mask_filename": ["focal_lesion"], "stats": ["max"]},
     }
 
     with (
@@ -2387,6 +2668,164 @@ def test_extract_rois_loads_preexisting_refined_masks(mock_patient):
     assert "Aorta MBP" in results
     assert "Liver" in results
     assert "Lumbar VB" in results
+
+
+def test_extract_rois_force_regenerates_refined_masks(mock_patient):
+    """force=True re-extracts reference ROIs instead of loading cached masks."""
+    from unittest.mock import patch as _patch
+
+    import numpy as np
+    import SimpleITK as sitk
+
+    from autods_pet.config import default_config
+    from autods_pet.pipeline import extract_rois
+
+    cfg = default_config()
+    cfg["paths"]["basepath"] = "/tmp"
+    cfg.setdefault("pipeline", {})["force"] = True
+
+    fake_pet = sitk.GetImageFromArray(np.full((5, 5, 5), 2.0, dtype=np.float64))
+    fake_pet.SetSpacing((1.0, 1.0, 1.0))
+
+    fake_mask = sitk.GetImageFromArray(np.ones((5, 5, 5), dtype=np.uint8))
+    fake_mask.SetSpacing((1.0, 1.0, 1.0))
+
+    refined_dir = mock_patient.seg_dir / "refined"
+    refined_dir.mkdir(parents=True, exist_ok=True)
+    for name in ["aorta_mbp", "liver", "grey_matter", "long_bones", "lumbar_vb"]:
+        sitk.WriteImage(fake_mask, str(refined_dir / f"{name}.nii.gz"))
+
+    mock_patient.vert_body_seg_path.parent.mkdir(parents=True, exist_ok=True)
+    mock_patient.vert_body_seg_path.write_bytes(b"fake")
+
+    with (
+        _patch.object(mock_patient, "load_segmentation", return_value=MagicMock()),
+        _patch.object(mock_patient, "load_pet_registered", return_value=fake_pet),
+        _patch("autods_pet.pipeline._extract_targets", return_value=({}, [])),
+        _patch(
+            "autods_pet.pipeline._extract_aorta_mbp",
+            return_value=(MagicMock(), ("Aorta MBP", "ok", "")),
+        ) as mock_aorta,
+        _patch(
+            "autods_pet.pipeline._extract_liver",
+            return_value=(MagicMock(), ("Liver", "ok", "")),
+        ) as mock_liver,
+        _patch(
+            "autods_pet.pipeline._extract_brain",
+            return_value=(MagicMock(), ("Brain", "ok", "")),
+        ) as mock_brain,
+        _patch(
+            "autods_pet.pipeline._extract_long_bones",
+            return_value=(MagicMock(), ("Long bones", "ok", "")),
+        ) as mock_bones,
+        _patch(
+            "autods_pet.pipeline._extract_lumbar_vb",
+            return_value=(MagicMock(), ("Lumbar VB (L3-L5)", "ok", "")),
+        ) as mock_lumbar,
+    ):
+        extract_rois(cfg, mock_patient, seg_result={"vb_available": True})
+
+    mock_aorta.assert_called_once()
+    mock_liver.assert_called_once()
+    mock_brain.assert_called_once()
+    mock_bones.assert_called_once()
+    mock_lumbar.assert_called_once()
+
+
+def test_brain_profile_extracts_reference_rois_and_emits_lb_ds(tmp_path, mock_patient):
+    """Pin the brain profile's runtime behaviour and its score keys.
+
+    The generated ``brain.ini`` omits the aorta/long-bones/lumbar sections,
+    but ``load_config`` refills them, so extraction runs them and ``LB_DS``
+    is produced alongside ``BLR``.  See ``configs/README.md``.
+    """
+    from unittest.mock import patch as _patch
+
+    import numpy as np
+    import SimpleITK as sitk
+
+    from autods_pet.config import create_default_config, load_config
+    from autods_pet.pipeline import extract_rois, score_deauville
+
+    ini = tmp_path / "brain.ini"
+    create_default_config(ini, profile="brain")
+    cfg = load_config(ini, validate=False)
+    cfg["paths"]["basepath"] = str(tmp_path)
+
+    fake_pet = sitk.GetImageFromArray(np.full((4, 4, 4), 2.0, dtype=np.float64))
+
+    def _roi(**stats):
+        return ROIResult(stats=stats)
+
+    with (
+        _patch.object(mock_patient, "load_segmentation", return_value=MagicMock()),
+        _patch.object(mock_patient, "load_pet_registered", return_value=fake_pet),
+        _patch("autods_pet.pipeline._extract_targets", return_value=({}, [])),
+        _patch(
+            "autods_pet.pipeline._extract_aorta_mbp",
+            return_value=(_roi(median=2.0), ("Aorta MBP", "ok", "")),
+        ) as mock_aorta,
+        _patch(
+            "autods_pet.pipeline._extract_liver",
+            return_value=(_roi(median=3.0), ("Liver", "ok", "")),
+        ),
+        _patch(
+            "autods_pet.pipeline._extract_brain",
+            return_value=(_roi(median=9.0), ("Brain", "ok", "")),
+        ),
+        _patch(
+            "autods_pet.pipeline._extract_long_bones",
+            return_value=(_roi(p95=4.0), ("Long bones", "ok", "")),
+        ) as mock_bones,
+    ):
+        results = extract_rois(cfg, mock_patient, seg_result={"vb_available": False})
+
+    # Reference ROIs are extracted despite being absent from the INI.
+    mock_aorta.assert_called_once()
+    mock_bones.assert_called_once()
+    assert "Aorta MBP" in results
+    assert "Long bones" in results
+
+    scores = score_deauville(cfg, results)
+    assert set(scores) == {"LB_DS", "BLR"}
+    assert scores["BLR"] == pytest.approx(3.0)
+
+
+def test_should_skip_patient_false_without_targets(mock_patient):
+    """A reference-only config never skips a patient."""
+    from unittest.mock import patch as _patch
+
+    from autods_pet.config import default_config, get_all_targets
+    from autods_pet.pipeline import should_skip_patient
+
+    cfg = default_config()
+    cfg["paths"]["basepath"] = "/tmp"
+    assert not get_all_targets(cfg)
+
+    with _patch(
+        "autods_pet.pipeline._has_new_target_masks", return_value=False
+    ) as mock_gate:
+        assert should_skip_patient(cfg, mock_patient) is False
+
+    mock_gate.assert_not_called()
+
+
+def test_should_skip_patient_true_when_targets_have_no_new_masks(mock_patient):
+    """A configured target with no new mask still skips the patient."""
+    from unittest.mock import patch as _patch
+
+    from autods_pet.config import default_config
+    from autods_pet.pipeline import should_skip_patient
+
+    cfg = default_config()
+    cfg["paths"]["basepath"] = "/tmp"
+    cfg["focal_lesion"] = {"mask_filename": ["focal_lesion"], "stats": ["max"]}
+
+    with _patch("autods_pet.pipeline._has_new_target_masks", return_value=False):
+        assert should_skip_patient(cfg, mock_patient) is True
+
+    with _patch("autods_pet.pipeline._has_new_target_masks", return_value=True):
+        assert should_skip_patient(cfg, mock_patient) is False
 
 
 def test_extract_rois_with_subtract_lesions(mock_patient):

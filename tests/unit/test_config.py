@@ -376,6 +376,83 @@ def test_config_validator_collects_multiple_errors():
     assert len(v.errors) >= 2
 
 
+def test_get_scoring_stat_defaults():
+    """Lesion sections default to max; custom targets default to p95."""
+    from autods_pet.config import get_scoring_stat
+
+    assert get_scoring_stat({"name": "focal_lesion", "stats": ["p90"]}) == "max"
+    assert get_scoring_stat({"name": "paramedullary"}) == "max"
+    assert get_scoring_stat({"name": "extramedullary"}) == "max"
+    assert get_scoring_stat({"name": "my_roi", "stats": ["mean"]}) == "p95"
+
+
+def test_get_scoring_stat_explicit_override():
+    """An explicit scoring_stat wins for both kinds of section."""
+    from autods_pet.config import get_scoring_stat
+
+    assert get_scoring_stat({"name": "focal_lesion", "scoring_stat": "p90"}) == "p90"
+    assert get_scoring_stat({"name": "my_roi", "scoring_stat": "max"}) == "max"
+    # Blank values fall back to the default rather than scoring on "".
+    assert get_scoring_stat({"name": "focal_lesion", "scoring_stat": "  "}) == "max"
+
+
+def test_config_validator_rejects_bad_scoring_stat_on_lesion():
+    cfg = default_config()
+    cfg["focal_lesion"] = {
+        "mask_filename": ["focal_lesion"],
+        "stats": ["max"],
+        "scoring_stat": "notastat",
+    }
+    v = ConfigValidator(cfg)
+    v.validate()
+    assert any(e.key == "scoring_stat" and "notastat" in e.message for e in v.errors)
+
+
+def test_config_validator_rejects_bad_scoring_stat_on_custom_target():
+    cfg = default_config()
+    cfg["targets"] = {
+        "my_roi": {
+            "mask_filename": ["custom"],
+            "stats": ["p95"],
+            "scoring_stat": "notastat",
+        }
+    }
+    v = ConfigValidator(cfg)
+    v.validate()
+    assert any(
+        e.section == "targets.my_roi" and e.key == "scoring_stat" for e in v.errors
+    )
+
+
+def test_config_validator_accepts_valid_scoring_stat():
+    cfg = default_config()
+    cfg["targets"] = {
+        "my_roi": {
+            "mask_filename": ["custom"],
+            "stats": ["p95"],
+            "scoring_stat": "p90",
+        }
+    }
+    v = ConfigValidator(cfg)
+    v.validate()
+    assert v.is_valid
+
+
+def test_load_config_reads_scoring_stat(tmp_path):
+    """scoring_stat survives the INI round-trip for both section kinds."""
+    ini = tmp_path / "cfg.ini"
+    ini.write_text(
+        "[paths]\nbasepath = /tmp\n\n"
+        "[focal_lesion]\nmask_filename = focal_lesion\n"
+        "stats = max, p90\nscoring_stat = p90\n\n"
+        "[targets.my_roi]\nmask_filename = custom\n"
+        "stats = p95\nscoring_stat = max\n"
+    )
+    cfg = load_config(ini, validate=False)
+    assert cfg["focal_lesion"]["scoring_stat"] == "p90"
+    assert cfg["targets"]["my_roi"]["scoring_stat"] == "max"
+
+
 def test_config_validator_invalid_stat():
     cfg = default_config()
     cfg["liver"]["stats"] = ["badstat"]
@@ -462,17 +539,11 @@ def test_validation_issue_fields():
     assert issue.level == "error"
 
 
-# -- load_config(validate=False) -----------------------------------------
-
-
 def test_load_config_validate_false_skips_validation(tmp_path):
     ini = tmp_path / "bad.ini"
     ini.write_text("[lumbar_vb]\nstats = foobar\n")
     cfg = load_config(ini, validate=False)  # should NOT raise
     assert cfg["lumbar_vb"]["stats"] == ["foobar"]
-
-
-# -- create_default_config ------------------------------------------------
 
 
 def test_create_default_config_writes_file(tmp_path):
@@ -506,9 +577,6 @@ def test_create_default_config_has_all_default_sections(tmp_path):
     cfg = load_config(out)
     for section in ("paths", "lumbar_vb", "aorta_mbp", "liver", "long_bones"):
         assert section in cfg
-
-
-# -- create_default_config - profiles ------------------------------------
 
 
 @pytest.mark.parametrize("profile", PROFILE_NAMES)
@@ -547,7 +615,8 @@ def test_profile_full_has_targets(tmp_path):
     assert cfg["output"]["save_raw_masks"] is True
 
 
-def test_profile_brain_skips_non_brain_rois(tmp_path):
+def test_profile_brain_omits_non_brain_sections_from_ini(tmp_path):
+    """The generated brain INI leaves out the non-brain ROI sections."""
     out = tmp_path / "brain.ini"
     create_default_config(out, profile="brain")
     text = out.read_text()
@@ -556,6 +625,22 @@ def test_profile_brain_skips_non_brain_rois(tmp_path):
     assert "[lumbar_vb]" not in text
     assert "[aorta_mbp]" not in text
     assert "[long_bones]" not in text
+
+
+def test_profile_brain_still_loads_reference_sections(tmp_path):
+    """Omitted sections are refilled from the defaults at load time.
+
+    ``_PROFILE_SKIP_SECTIONS`` only shortens the generated INI; it is not a
+    runtime switch.  The reference ROIs remain configured, which is what
+    lets the aorta mediastinal blood pool reference (and therefore the whole
+    Deauville ladder) be computed for the brain profile.
+    """
+    out = tmp_path / "brain.ini"
+    create_default_config(out, profile="brain")
+    cfg = load_config(out, validate=False)
+    assert "aorta_mbp" in cfg
+    assert "long_bones" in cfg
+    assert "lumbar_vb" in cfg
 
 
 def test_profile_invalid_raises_value_error(tmp_path):

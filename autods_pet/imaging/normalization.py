@@ -20,7 +20,10 @@ def parse_dicom_time(tstr: str) -> time:
     """Parse a DICOM TM string into a :class:`datetime.time`.
 
     Handles missing leading zeros, fractional seconds, and hours >= 24
-    (wrapped modulo 24).
+    (wrapped modulo 24).  Out-of-range minutes and seconds are clamped to
+    59 with a warning, so a leap second (``ss == 60``, permitted by the
+    DICOM TM value representation) or a malformed field does not abort a
+    run mid-cohort.
 
     Parameters
     ----------
@@ -43,6 +46,8 @@ def parse_dicom_time(tstr: str) -> time:
     datetime.time(14, 30, 12)
     >>> parse_dicom_time("090000")
     datetime.time(9, 0)
+    >>> parse_dicom_time("143060")  # leap second
+    datetime.time(14, 30, 59)
     """
     s = str(tstr).replace(":", "").strip()
     if not s:
@@ -68,6 +73,18 @@ def parse_dicom_time(tstr: str) -> time:
             hh % 24,
         )
         hh = hh % 24
+
+    if mm >= 60:
+        log.warning(
+            "DICOM time has minutes=%d (>=60); clamping to 59. Verify metadata.", mm
+        )
+        mm = 59
+
+    if ss >= 60:
+        log.warning(
+            "DICOM time has seconds=%d (>=60); clamping to 59. Verify metadata.", ss
+        )
+        ss = 59
 
     return time(hour=hh, minute=mm, second=ss, microsecond=us)
 
@@ -158,8 +175,9 @@ def seconds_between(
             )
         dt = corrected
         log.warning(
-            "Elapsed time was < -6 h (%.1f h after midnight correction); "
+            "Elapsed time was < -%.1f h (%.1f h after midnight correction); "
             "verify injection/acquisition times in metadata.",
+            max_uptake_hours,
             dt / 3600,
         )
     return dt
@@ -217,13 +235,34 @@ def effective_dose(
     -------
     float
         Dose in Bq to use as the SUV denominator.
+
+    Notes
+    -----
+    The denominator must be the activity present in the patient at the
+    same reference time the pixel values are corrected to:
+
+    ``ADMIN`` (and the non-standard ``YES``/``CORRECTED``) means the
+    pixels are decay corrected back to the injection time, so the raw
+    injected dose is already the activity at that reference time.
+
+    ``START`` means the pixels are decay corrected to the acquisition
+    start time, the dominant Siemens and GE whole-body FDG convention.
+    The reference activity is then the injected dose decayed from
+    injection to acquisition.
+
+    ``NONE`` (and unknown values, handled conservatively the same way)
+    means the pixels hold the activity measured at acquisition, so the
+    dose must likewise be decayed to that time.
     """
     dc = str(decay_correction).upper().strip()
 
     if dc in ("NONE", ""):
         return decay_dose(total_dose_bq, half_life_s, elapsed_s)
 
-    if dc in ("START", "ADMIN", "YES", "CORRECTED"):
+    if dc == "START":
+        return decay_dose(total_dose_bq, half_life_s, elapsed_s)
+
+    if dc in ("ADMIN", "YES", "CORRECTED"):
         return total_dose_bq
 
     log.warning("Unknown DecayCorrection='%s', applying decay correction.", dc)

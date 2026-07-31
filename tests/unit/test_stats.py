@@ -263,11 +263,6 @@ def test_mask_volume_equals_count_times_voxel_vol(spacing):
     assert mask_volume_mm3(mask) == pytest.approx(expected, rel=1e-6)
 
 
-# ---------------------------------------------------------------------------
-# _compute_on_vals edge cases
-# ---------------------------------------------------------------------------
-
-
 def test_compute_on_vals_min():
     """_compute_on_vals handles 'min' kind."""
     from autods_pet.ops.stats import _compute_on_vals

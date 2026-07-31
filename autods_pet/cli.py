@@ -678,13 +678,15 @@ def extract(
     """Extract ROI statistics from registered PET images."""
     from autods_pet.patient import PatientCase
     from autods_pet.pipeline import (
-        _has_new_target_masks,
         extract_rois,
+        should_skip_patient,
         write_patient_suv_csv,
     )
 
     _init_logging(verbose, log_file)
     cfg, patient_ids = _load_and_resolve(config, patients)
+    if force:
+        cfg.setdefault("pipeline", {})["force"] = True
     _apply_mask_flags(
         cfg, save_masks, save_raw_masks, save_refined_masks, subtract_lesions
     )
@@ -697,7 +699,7 @@ def extract(
         if explain_masks:
             _print_mask_discovery_report(cfg, pid)
         try:
-            if not force and not _has_new_target_masks(cfg, p):
+            if not force and should_skip_patient(cfg, p):
                 log.info("No new target masks for %s, skipping.", pid)
                 continue
 
@@ -741,15 +743,18 @@ def score(
     """Assign Deauville Scores from pre-extracted ROI statistics."""
     from autods_pet.patient import PatientCase
     from autods_pet.pipeline import (
-        _has_new_target_masks,
         extract_rois,
         score_deauville,
+        should_skip_patient,
         write_patient_deauville_csv,
         write_patient_suv_csv,
     )
 
     _init_logging(verbose, log_file)
     cfg, patient_ids = _load_and_resolve(config, patients)
+
+    if force:
+        cfg.setdefault("pipeline", {})["force"] = True
 
     if subtract_lesions:
         cfg.setdefault("output", {})["subtract_lesions_from_marrow"] = True
@@ -762,7 +767,7 @@ def score(
         if explain_masks:
             _print_mask_discovery_report(cfg, pid)
         try:
-            if not force and not _has_new_target_masks(cfg, p):
+            if not force and should_skip_patient(cfg, p):
                 log.info("No new target masks for %s, skipping.", pid)
                 continue
 

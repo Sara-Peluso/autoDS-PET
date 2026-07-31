@@ -2,7 +2,10 @@ CLI Reference
 =============
 
 autods-pet provides a command-line interface built with `Typer <https://typer.tiangolo.com/>`_.
-All commands share the following global options:
+
+The **pipeline commands** (``convert``, ``normalize``, ``register``,
+``segment``, ``extract``, ``score`` and ``run``) share the following
+options:
 
 .. list-table::
    :header-rows: 1
@@ -19,11 +22,30 @@ All commands share the following global options:
    * - ``-v, --verbose``
      - Enable DEBUG-level logging.
    * - ``--force``
-     - Re-run stages even if outputs already exist (applies to ``convert``,
-       ``normalize``, ``register``, ``segment``, ``extract``, ``score``,
-       ``run``).  By default, completed stages are skipped.
-   * - ``-V, --version``
-     - Show version and exit.
+     - Re-run stages even if outputs already exist.  By default, completed
+       stages are skipped.
+
+The **utility commands** do not take ``-c/--config``; each has its own
+signature:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 34 66
+
+   * - Command
+     - Signature
+   * - ``create-config``
+     - ``-o/--output PATH``, ``-p/--profile TEXT`` (profile, **not**
+       patients), ``--force`` (overwrite an existing file).
+   * - ``validate-config``
+     - Takes the config as a **positional argument**, not ``-c``:
+       ``autods-pet validate-config my_config.ini``.  Optionally
+       ``-p/--patients TEXT`` for a mask-discovery preview.
+   * - ``list-segments``
+     - Takes a DICOM SEG path as a positional argument.
+
+``-V, --version`` is available on the top-level command only
+(``autods-pet --version``), not on individual subcommands.
 
 
 ``autods-pet create-config``
@@ -57,12 +79,12 @@ See also the example configs in the ``configs/`` folder.
 
 .. list-table:: Available profiles
    :header-rows: 1
-   :widths: 15 15 10 12 15 33
+   :widths: 14 14 10 16 15 31
 
    * - Profile
      - TotalSeg
      - License
-     - Targets
+     - Target masks
      - Masks saved
      - Use case
    * - ``quick``
@@ -95,6 +117,81 @@ See also the example configs in the ``configs/`` folder.
      - None
      - Refined only
      - Brain-to-Liver Ratio studies
+
+"Target masks" lists which manual lesion mask sections the generated
+config enables, not which scores come out.  The scores each profile
+produces are:
+
+.. list-table:: Deauville Scores produced by profile
+   :header-rows: 1
+   :stub-columns: 1
+   :widths: 20 13 13 13 13 13 13
+
+   * - Profile
+     - BM_DS
+     - LB_DS
+     - FL_DS
+     - PM_DS
+     - EM_DS
+     - BLR
+   * - ``quick``
+     - No
+     - **Yes**
+     - No
+     - No
+     - No
+     - **Yes**
+   * - ``standard``
+     - No
+     - **Yes**
+     - No
+     - No
+     - No
+     - **Yes**
+   * - ``advanced``
+     - **Yes**
+     - **Yes**
+     - No
+     - No
+     - No
+     - **Yes**
+   * - ``full``
+     - **Yes**
+     - **Yes**
+     - **Yes**
+     - **Yes**
+     - **Yes**
+     - **Yes**
+   * - ``brain``
+     - No
+     - **Yes**
+     - No
+     - No
+     - No
+     - **Yes**
+
+Two rules explain the whole table:
+
+* ``BM_DS`` needs the lumbar vertebral body segmentation, which is a
+  licensed TotalSegmentator task.  Only the profiles with a license key
+  produce it.
+* ``FL_DS``, ``PM_DS`` and ``EM_DS`` score user-provided lesion masks, so
+  they only appear when the matching target section is enabled.  Only
+  ``full`` enables them out of the box; adding a ``[focal_lesion]``,
+  ``[paramedullary]`` or ``[extramedullary]`` section to any other profile
+  produces the corresponding score.
+
+``LB_DS`` and ``BLR`` come from the automatic reference ROIs and are
+therefore produced by every profile, ``brain`` included.
+
+.. note::
+
+   ``brain`` omits the ``[aorta_mbp]``, ``[long_bones]`` and ``[lumbar_vb]``
+   sections from the *generated file* only.  They are refilled from the
+   built-in defaults when the config is loaded, so those ROIs are still
+   extracted and ``LB_DS`` is still produced.  The aorta mediastinal blood
+   pool anchors the Deauville ladder and is required for scoring, BLR
+   included, so it cannot be dropped.
 
 
 ``autods-pet validate-config``

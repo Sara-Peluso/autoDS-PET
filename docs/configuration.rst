@@ -279,9 +279,72 @@ Each section may set:
   or location is required.  A single multi-segment SEG file may supply
   several target sections at once.  Only consulted for ``.dcm`` files.
 
-Set either, both, or neither.  When both formats resolve the same
-target for the same patient, **DICOM SEG wins** and a note is logged.
-A target with neither key set is treated as disabled.
+- ``scoring_stat`` : the single statistic used to assign the Deauville
+  Score.  Optional; see `Which statistic is scored`_ below.
+
+Set either of the identity keys, both, or neither.  When both formats
+resolve the same target for the same patient, **DICOM SEG wins** and a
+note is logged.  A target with neither identity key set is treated as
+disabled.
+
+.. _Which statistic is scored:
+
+Which statistic is scored
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A Deauville Score needs exactly **one** number per target, but ``stats``
+may list several.  ``scoring_stat`` decides which one is scored;
+everything else in ``stats`` is reported in ``SUV_values.csv`` and plays
+no part in the score.
+
+Without ``scoring_stat`` the default depends on the kind of section:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Section
+     - Default
+     - Why
+   * - ``[focal_lesion]``, ``[paramedullary]``, ``[extramedullary]``
+     - ``max``
+     - Deauville is read off the most intense uptake in a focal lesion.
+   * - ``[targets.<name>]``
+     - ``p95``
+     - A custom target is not a focal lesion (anything focal belongs in
+       a named section), so it is treated as a region of diffuse uptake
+       and scored like the marrow ROIs (``[lumbar_vb]``,
+       ``[long_bones]``), which also use ``p95``.
+
+The scoring statistic is **always computed**, whether or not it appears
+in ``stats``.  Configuring ``[focal_lesion]`` with ``stats = p90`` yields
+a ``p90`` row *and* a ``max`` row in ``SUV_values.csv``, with the score
+taken from ``max``.
+
+Any statistic may be scored, on any section:
+
+.. code-block:: ini
+
+   [focal_lesion]
+   segment_label = Focal lesion, FL
+   stats = max, p90
+   scoring_stat = p90       ; score on p90 instead of max
+
+   [targets.diffuse_uptake]
+   mask_filename = diffuse
+   stats = p95, mean
+   ; scoring_stat omitted -> p95
+
+   [targets.second_lesion]
+   mask_filename = lesion2
+   stats = max, p90
+   scoring_stat = max       ; treat this custom target as focal
+
+``autods-pet validate-config`` rejects a ``scoring_stat`` that is not a
+recognised statistic name.  If a target is scored on a statistic that its
+results do not contain, which can only happen when reading back an
+``SUV_values.csv`` written by an older version, the target is reported
+in a warning naming the available statistics, never dropped silently.
 
 A configured target whose mask cannot be found anywhere produces a
 loud warning naming the patient, the patterns searched for, and the

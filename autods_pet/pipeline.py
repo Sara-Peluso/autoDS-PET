@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import subprocess
-from datetime import datetime
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -181,6 +181,35 @@ def _has_new_target_masks(cfg: dict[str, Any], patient: PatientCase) -> bool:
             return True
 
     return False
+
+
+def should_skip_patient(cfg: dict[str, Any], patient: PatientCase) -> bool:
+    """Return *True* when *patient* has no outstanding work for extract/score.
+
+    A patient is only skipped when target ROIs are configured **and** none of
+    their masks is new (see :func:`_has_new_target_masks`).  Reference-only
+    configurations - the ``quick``, ``standard``, ``advanced`` and ``brain``
+    profiles all ship without target sections - have nothing to gate on, so
+    they always proceed and produce the reference ROIs plus ``BM_DS``,
+    ``LB_DS`` and ``BLR``.
+
+    Parameters
+    ----------
+    cfg : dict
+        Configuration dict.
+    patient : PatientCase
+        Patient case with resolved paths.
+
+    Returns
+    -------
+    bool
+        *True* if the patient can be skipped.
+    """
+    from autods_pet.config import get_all_targets
+
+    if not get_all_targets(cfg):
+        return False
+    return not _has_new_target_masks(cfg, patient)
 
 
 def _load_cached_references(patient: PatientCase) -> dict[str, Any] | None:
@@ -649,8 +678,10 @@ def convert_images(
             return {"ct_path": ct_path, "pet_path": pet_path, "skipped": True}
 
     # Detect format from input directory.
+    from autods_pet.imaging.dicom import contains_dicom_files
+
     fmt = _detect_format(input_dir)
-    has_dcm = fmt == "dicom" and any(input_dir.rglob("*.dcm"))
+    has_dcm = fmt == "dicom" and contains_dicom_files(input_dir)
     if not has_dcm:
         nifti_pairs = _find_nifti_sources(input_dir, ct_path, pet_path)
         if nifti_pairs:
@@ -696,6 +727,72 @@ def _resolve_pet_metadata(cfg: dict[str, Any], patient: PatientCase) -> dict[str
             "Run 'autods-pet convert' first or provide a metadata_csv."
         )
     return metadata
+
+
+def _resolve_injection_datetime(
+    metadata: dict[str, Any],
+    study_date: date,
+) -> datetime:
+    """Resolve the radiopharmaceutical injection datetime from PET metadata.
+
+    ``RadiopharmaceuticalStartDateTime`` (0018,1078) is preferred because it
+    encodes the full date and time, so multi-day protocols are handled
+    correctly and Enhanced PET objects that leave
+    ``RadiopharmaceuticalStartTime`` (0018,1072) empty still resolve.  When
+    only the time is available it is combined with *study_date*.
+
+    Parameters
+    ----------
+    metadata : dict
+        Merged PET metadata (JSON sidecar plus CSV fallback).
+    study_date : datetime.date
+        Parsed ``StudyDate``, used when only a time-of-day is available.
+
+    Returns
+    -------
+    datetime.datetime
+        The injection datetime.
+
+    Raises
+    ------
+    ValueError
+        If neither injection tag yields a usable time.
+    """
+    from autods_pet.imaging.normalization import parse_dicom_date, parse_dicom_time
+
+    raw_time = metadata.get("RadiopharmaceuticalStartTime")
+    inj_time: time | None = None
+    if raw_time is not None and str(raw_time).strip():
+        inj_time = parse_dicom_time(str(raw_time))
+
+    raw_dt = metadata.get("RadiopharmaceuticalStartDateTime")
+    if raw_dt is not None and str(raw_dt).strip():
+        dt_str = str(raw_dt).strip()
+        # A DICOM DT may carry a UTC offset suffix (&ZZXX); drop it.
+        for sep in ("+", "-"):
+            idx = dt_str.find(sep, 8)
+            if idx != -1:
+                dt_str = dt_str[:idx]
+        try:
+            inj_date = parse_dicom_date(dt_str[:8])
+            time_part = dt_str[8:]
+            inj_time_full = parse_dicom_time(time_part) if time_part else inj_time
+            if inj_time_full is not None:
+                return datetime.combine(inj_date, inj_time_full)
+        except (ValueError, IndexError):
+            log.warning(
+                "Could not parse RadiopharmaceuticalStartDateTime=%r; "
+                "falling back to RadiopharmaceuticalStartTime.",
+                raw_dt,
+            )
+
+    if inj_time is None:
+        raise ValueError(
+            "No usable injection time: both RadiopharmaceuticalStartTime "
+            "(0018,1072) and RadiopharmaceuticalStartDateTime (0018,1078) "
+            "are missing or unparseable."
+        )
+    return datetime.combine(study_date, inj_time)
 
 
 def normalize_pet(
@@ -744,24 +841,7 @@ def normalize_pet(
 
     study_date = parse_dicom_date(str(metadata["StudyDate"]))
     acq_time = parse_dicom_time(str(metadata["AcquisitionTime"]))
-    inj_time = parse_dicom_time(str(metadata["RadiopharmaceuticalStartTime"]))
-
-    # Use RadiopharmaceuticalStartDateTime (0018,1078) when available - it
-    # encodes the full date+time so multi-day protocols are handled correctly.
-    # Fall back to combining injection time with StudyDate (assumes same day).
-    rph_start_dt = metadata.get("RadiopharmaceuticalStartDateTime")
-    if rph_start_dt and str(rph_start_dt).strip():
-        try:
-            rph_str = str(rph_start_dt).strip()
-            inj_date = parse_dicom_date(rph_str[:8])
-            inj_time_full = (
-                parse_dicom_time(rph_str[8:]) if len(rph_str) > 8 else inj_time
-            )
-            injection_dt = datetime.combine(inj_date, inj_time_full)
-        except (ValueError, IndexError):
-            injection_dt = datetime.combine(study_date, inj_time)
-    else:
-        injection_dt = datetime.combine(study_date, inj_time)
+    injection_dt = _resolve_injection_datetime(metadata, study_date)
 
     acquisition_dt = datetime.combine(study_date, acq_time)
     elapsed_s = seconds_between(injection_dt, acquisition_dt)
@@ -1109,6 +1189,14 @@ def _resolve_mask_geometry(
         resample_to_reference,
     )
 
+    # A 2D mask can never be aligned onto a 3D PET
+    if mask.GetDimension() != 3:
+        raise ValueError(
+            f"{display_name} mask is {mask.GetDimension()}D; a 3D mask is "
+            "required. Re-export a single slice as a 3D volume of size "
+            "(x, y, 1)."
+        )
+
     if check_same_geometry(mask, pet):
         return mask
 
@@ -1164,7 +1252,7 @@ def _extract_targets(
     """
     import SimpleITK as sitk
 
-    from autods_pet.config import get_all_targets
+    from autods_pet.config import get_all_targets, get_scoring_stat
     from autods_pet.roi import TargetROI
 
     results: dict[str, Any] = {}
@@ -1206,14 +1294,27 @@ def _extract_targets(
                 from autods_pet.ops.dicom_seg import read_dicom_seg
 
                 mask = read_dicom_seg(
-                    mask_info.path, segment_label=mask_info.segment_label
+                    mask_info.path,
+                    segment_label=mask_info.segment_label,
+                    segment_number=mask_info.segment_number,
                 )
             else:
                 mask = sitk.ReadImage(str(mask_info.path))
 
             mask = _resolve_mask_geometry(mask, pet, patient, display_name)
 
-            target = TargetROI(stats=target_cfg.get("stats"))
+            stat_names = list(target_cfg.get("stats") or [])
+            scoring_stat = get_scoring_stat(target_cfg)
+            if scoring_stat not in stat_names:
+                stat_names.append(scoring_stat)
+                log.info(
+                    "%s: adding '%s' to the computed statistics; it is the "
+                    "scoring statistic for this target.",
+                    display_name,
+                    scoring_stat,
+                )
+
+            target = TargetROI(stats=stat_names)
             result = target.extract(mask, pet)
             results[display_name] = result
 
@@ -1450,27 +1551,78 @@ def _pick_best_stat(
     return None
 
 
+# Config section backing each named target display name.
+_DS_TARGET_SECTIONS: dict[str, str] = {
+    "Focal lesion": "focal_lesion",
+    "Paramedullary": "paramedullary",
+    "Extramedullary": "extramedullary",
+}
+
+
+def _scoring_stats_by_display_name(cfg: dict[str, Any]) -> dict[str, str]:
+    """Map ROI display name to the statistic that scores it."""
+    from autods_pet.config import get_scoring_stat
+
+    section_to_display = {v: k for k, v in _DS_TARGET_SECTIONS.items()}
+    result: dict[str, str] = {}
+    for tcfg in _all_targets(cfg):
+        name = tcfg.get("name", "")
+        result[section_to_display.get(name, name)] = get_scoring_stat(tcfg)
+    return result
+
+
+def _all_targets(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    """Thin wrapper so the lazy import stays in one place."""
+    from autods_pet.config import get_all_targets
+
+    return get_all_targets(cfg)
+
+
 def _score_named_targets(
+    cfg: dict[str, Any],
     extract_results: dict[str, Any],
     mbp: float,
     liver: float,
     liver_multiplier: float,
 ) -> dict[str, int]:
-    """Compute DS for named target ROIs (FL, PM, EM)."""
+    """Compute DS for named target ROIs (FL, PM, EM).
+
+    Lesions are scored on their maximum SUV by default, matching the
+    clinical reading of the Deauville scale; a section may override this
+    with ``scoring_stat``.  :func:`_extract_targets` guarantees the chosen
+    statistic is computed, so a missing value here means the stats came
+    from an older cached CSV; that is reported rather than dropped.
+    """
+    from autods_pet.config import DEFAULT_LESION_SCORING_STAT
     from autods_pet.deauville import assign_ds
+
+    scoring_stats = _scoring_stats_by_display_name(cfg)
 
     scores: dict[str, int] = {}
     for roi_name, ds_key in DS_TARGET_NAMES.items():
         stats = _get_roi_stats(extract_results.get(roi_name))
-        target_value = _pick_best_stat(stats, ("max", "p95", "median", "mean"))
-        if target_value is not None:
-            scores[ds_key] = assign_ds(
-                target_value,
-                mbp,
-                liver,
-                allow_ds1=(ds_key == "FL_DS"),
-                liver_multiplier=liver_multiplier,
+        if not stats:
+            continue
+        stat_name = scoring_stats.get(roi_name, DEFAULT_LESION_SCORING_STAT)
+        target_value = stats.get(stat_name)
+        if target_value is None:
+            log.warning(
+                "%s has no '%s' statistic, so no %s was assigned. "
+                "Re-run extraction to compute it, or set 'scoring_stat' to "
+                "one of: %s.",
+                roi_name,
+                stat_name,
+                ds_key,
+                ", ".join(stats) or "(none computed)",
             )
+            continue
+        scores[ds_key] = assign_ds(
+            target_value,
+            mbp,
+            liver,
+            allow_ds1=(ds_key == "FL_DS"),
+            liver_multiplier=liver_multiplier,
+        )
     return scores
 
 
@@ -1498,28 +1650,49 @@ def _score_research_metrics(
 
 
 def _score_custom_targets(
+    cfg: dict[str, Any],
     extract_results: dict[str, Any],
     mbp: float,
     liver: float,
     liver_multiplier: float,
     skip_rois: set[str],
 ) -> dict[str, int]:
-    """Compute DS for user-defined custom target ROIs."""
+    """Compute DS for user-defined custom target ROIs.
+
+    A custom target is scored on its ``scoring_stat``, which defaults to
+    ``p95``: anything focal belongs in a named lesion section, so a custom
+    ``[targets.*]`` region is treated as diffuse uptake and scored like the
+    marrow ROIs.  See :func:`autods_pet.config.get_scoring_stat`.
+    """
+    from autods_pet.config import DEFAULT_CUSTOM_TARGET_SCORING_STAT
     from autods_pet.deauville import assign_ds
+
+    scoring_stats = _scoring_stats_by_display_name(cfg)
 
     scores: dict[str, int] = {}
     for roi_name, roi_data in extract_results.items():
         if roi_name.startswith("_") or roi_name in skip_rois:
             continue
         stats = _get_roi_stats(roi_data)
-        target_value = next(iter(stats.values()), None) if stats else None
-        if target_value is not None:
-            scores[roi_name] = assign_ds(
-                target_value,
-                mbp,
-                liver,
-                liver_multiplier=liver_multiplier,
+        if not stats:
+            continue
+        stat_name = scoring_stats.get(roi_name, DEFAULT_CUSTOM_TARGET_SCORING_STAT)
+        target_value = stats.get(stat_name)
+        if target_value is None:
+            log.warning(
+                "Custom target %r has no '%s' statistic, so no score was "
+                "assigned. Set 'scoring_stat' to one of: %s.",
+                roi_name,
+                stat_name,
+                ", ".join(stats) or "(none computed)",
             )
+            continue
+        scores[roi_name] = assign_ds(
+            target_value,
+            mbp,
+            liver,
+            liver_multiplier=liver_multiplier,
+        )
     return scores
 
 
@@ -1573,7 +1746,7 @@ def score_deauville(
 
     scores.update(
         _score_named_targets(
-            extract_results, mbp_median, liver_median, liver_multiplier
+            cfg, extract_results, mbp_median, liver_median, liver_multiplier
         )
     )
     scores.update(
@@ -1583,7 +1756,7 @@ def score_deauville(
     )
     scores.update(
         _score_custom_targets(
-            extract_results, mbp_median, liver_median, liver_multiplier, skip_rois
+            cfg, extract_results, mbp_median, liver_median, liver_multiplier, skip_rois
         )
     )
 

@@ -63,8 +63,10 @@ See :func:`autods_pet.imaging.segmentation.run_totalsegmentator`.
 Region of Interest Extraction
 -----------------------------
 
-Six ROIs are derived from the TotalSegmentator segmentation and, where
-applicable, further refined using image processing operations.  All
+Five ROIs are derived from the TotalSegmentator segmentation and, where
+applicable, further refined using image processing operations.  The sixth,
+the focal lesion, is not segmented automatically: it is supplied by the
+user as a manual mask (NIfTI/NRRD or DICOM SEG).  All
 morphological operations (erosion, dilation) are performed in **physical space
 (mm)** using signed Euclidean distance transforms, making them robust to
 anisotropic voxel spacing.
@@ -208,3 +210,9 @@ The pipeline is implemented in Python using SimpleITK-SimpleElastix for image
 processing and registration, NumPy for array operations, and TotalSegmentator
 for anatomical segmentation.  The software is available as an installable
 Python package (``autods-pet``).
+
+The methodology described above, together with its clinical validation on a cohort of 165 newly diagnosed multiple myeloma patients, is reported in:
+
+   Peluso S, Polizzi S, Pagnini L, Tarozzi M, Rocchi E, Dragonetti V, Solli V, Dall'Olio D, Talarico M, Terragna C, Sala C, Zamagni E, Fanti S, Nanni C, Castellani G.  *Automated Deauville Score computation from baseline [18F]FDG PET/CT predicts progression-free survival in multiple myeloma: a radiogenomic framework.*  European Journal of Nuclear Medicine and Molecular Imaging.  2026.  `doi:10.1007/s00259-026-08103-x <https://doi.org/10.1007/s00259-026-08103-x>`_
+
+See :doc:`index` for the BibTeX entry.

@@ -102,19 +102,67 @@ def test_decay_dose_one_half_life():
     assert result == pytest.approx(185e6, rel=1e-6)
 
 
+def test_parse_dicom_time_leap_second_clamped(caplog):
+    """ss == 60 is legal in a DICOM TM but not in datetime.time."""
+    with caplog.at_level(logging.WARNING):
+        result = parse_dicom_time("143060")
+    assert result == time(14, 30, 59)
+    assert "seconds=60" in caplog.text
+
+
+def test_parse_dicom_time_out_of_range_minutes_clamped(caplog):
+    with caplog.at_level(logging.WARNING):
+        result = parse_dicom_time("147000")
+    assert result == time(14, 59, 0)
+    assert "minutes=70" in caplog.text
+
+
+def test_seconds_between_warning_reports_the_configured_bound(caplog):
+    """The warning quotes max_uptake_hours, not a hardcoded 6 h."""
+    injection = datetime(2023, 1, 1, 20, 0)
+    acquisition = datetime(2023, 1, 1, 9, 0)  # -11 h, wraps to +13 h
+    with caplog.at_level(logging.WARNING):
+        seconds_between(injection, acquisition, max_uptake_hours=2.0)
+    assert "< -2.0 h" in caplog.text
+
+
 def test_effective_dose_none():
-    # DecayCorrection = "NONE" → apply decay
+    # DecayCorrection = "NONE" means apply decay
     result = effective_dose(370e6, 6586.2, 3600, "NONE")
     assert result < 370e6
 
 
-def test_effective_dose_start():
-    # DecayCorrection = "START" → return dose unchanged
-    assert effective_dose(370e6, 6586.2, 3600, "START") == 370e6
+def test_effective_dose_start_decays_to_acquisition():
+    # DecayCorrection = "START" means pixels are corrected to scan start, so the
+    # denominator is the dose decayed from injection to acquisition.
+    expected = decay_dose(370e6, 6586.2, 3600)
+    assert effective_dose(370e6, 6586.2, 3600, "START") == pytest.approx(expected)
+    assert effective_dose(370e6, 6586.2, 3600, "START") < 370e6
 
 
 def test_effective_dose_admin():
     assert effective_dose(370e6, 6586.2, 3600, "ADMIN") == 370e6
+
+
+@pytest.mark.parametrize(
+    ("decay_correction", "decayed"),
+    [
+        ("NONE", True),
+        ("", True),
+        ("START", True),
+        ("ADMIN", False),
+        ("YES", False),
+        ("CORRECTED", False),
+        ("FOOBAR", True),
+    ],
+)
+def test_effective_dose_branches(decay_correction, decayed):
+    """Every DecayCorrection branch picks the documented reference dose."""
+    dose, half_life, elapsed = 370e6, 6586.2, 3600
+    expected = decay_dose(dose, half_life, elapsed) if decayed else dose
+    assert effective_dose(dose, half_life, elapsed, decay_correction) == pytest.approx(
+        expected
+    )
 
 
 def test_effective_dose_unknown_warns(caplog):
