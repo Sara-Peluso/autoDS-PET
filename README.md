@@ -6,6 +6,7 @@
 
 **Automatic and semi-automatic Deauville Score computation from PET/CT images**
 
+[![PyPI](https://img.shields.io/pypi/v/autods-pet?color=0dafb5&logo=pypi&logoColor=white)](https://pypi.org/project/autods-pet/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-0dafb5?logo=python&logoColor=white)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-0dafb5)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/Sara-Peluso/autoDS-PET/ci.yaml?label=CI&color=0dafb5)](https://github.com/Sara-Peluso/autoDS-PET/actions)

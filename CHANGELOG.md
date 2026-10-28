@@ -3,7 +3,7 @@
 All notable changes to autoDS-PET are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [0.2.0] - 2026-07-31
+## [0.2.0] - 2026-10-28
 
 ### Added
 
